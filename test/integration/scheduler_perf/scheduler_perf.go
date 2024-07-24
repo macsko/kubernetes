@@ -239,17 +239,14 @@ func (w *workload) isValid(mcc *metricsCollectorConfig) error {
 }
 
 func (w *workload) setDefaults(testCaseThresholdMetricSelector *thresholdMetricSelector) {
-	if w.ThresholdMetricSelector != nil {
-		return
+	if w.ThresholdMetricSelector == nil {
+		if testCaseThresholdMetricSelector == nil {
+			w.ThresholdMetricSelector = &thresholdMetricSelector{}
+		} else {
+			w.ThresholdMetricSelector = testCaseThresholdMetricSelector
+		}
 	}
-	if testCaseThresholdMetricSelector != nil {
-		w.ThresholdMetricSelector = testCaseThresholdMetricSelector
-		return
-	}
-	// By defult, SchedulingThroughput should be compared with the threshold.
-	w.ThresholdMetricSelector = &thresholdMetricSelector{
-		Name: "SchedulingThroughput",
-	}
+	w.ThresholdMetricSelector.setDefaults()
 }
 
 // thresholdMetricSelector defines the name and labels of metric to compare with threshold.
@@ -262,6 +259,11 @@ type thresholdMetricSelector struct {
 	// If false, the threshold defines minimum allowable value.
 	// Optional
 	ExpectLower bool
+	// ComparedStatistic defines what statistic should be used in comparison.
+	// One of: Average, Perc50, Perc90, Perc95, Perc99.
+	// If empty, the statistic is set to Perc95.
+	// Optional
+	ComparedStatistic string
 }
 
 func (ms thresholdMetricSelector) isValid(mcc *metricsCollectorConfig) error {
@@ -284,6 +286,16 @@ func (ms thresholdMetricSelector) isValid(mcc *metricsCollectorConfig) error {
 		}
 	}
 	return fmt.Errorf("no matching labels found for metric %v", ms.Name)
+}
+
+func (ms *thresholdMetricSelector) setDefaults() {
+	if ms.Name == "" {
+		// By default, SchedulingThroughput should be compared with the threshold.
+		ms.Name = "SchedulingThroughput"
+	}
+	if ms.ComparedStatistic == "" {
+		ms.ComparedStatistic = "Perc95"
+	}
 }
 
 type params struct {
@@ -941,11 +953,12 @@ func compareMetricWithThreshold(items []DataItem, threshold float64, metricSelec
 		return nil
 	}
 	for _, item := range items {
-		if item.Labels["Metric"] == metricSelector.Name && labelsMatch(item.Labels, metricSelector.Labels) && !valueWithinThreshold(item.Data["Average"], threshold, metricSelector.ExpectLower) {
+		value := item.Data[metricSelector.ComparedStatistic]
+		if item.Labels["Metric"] == metricSelector.Name && labelsMatch(item.Labels, metricSelector.Labels) && !valueWithinThreshold(value, threshold, metricSelector.ExpectLower) {
 			if metricSelector.ExpectLower {
-				return fmt.Errorf("expected %s Average to be lower: got %f, want %f", metricSelector.Name, item.Data["Average"], threshold)
+				return fmt.Errorf("expected %s %s to be lower: got %f, want %f", metricSelector.Name, metricSelector.ComparedStatistic, value, threshold)
 			}
-			return fmt.Errorf("expected %s Average to be higher: got %f, want %f", metricSelector.Name, item.Data["Average"], threshold)
+			return fmt.Errorf("expected %s %s to be higher: got %f, want %f", metricSelector.Name, metricSelector.ComparedStatistic, value, threshold)
 		}
 	}
 	return nil
