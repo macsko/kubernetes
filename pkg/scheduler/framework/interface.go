@@ -57,7 +57,7 @@ type NodeToStatusReader interface {
 	Get(nodeName string) *Status
 	// NodesForStatusCode returns a list of NodeInfos for the nodes that have a given status code.
 	// It returns the NodeInfos for all matching nodes denoted by AbsentNodesStatus as well.
-	NodesForStatusCode(nodeLister NodeInfoLister, code Code) ([]*NodeInfo, error)
+	NodesForStatusCode(logger klog.Logger, nodeLister NodeInfoLister, code Code) ([]*NodeInfo, error)
 }
 
 // NodeToStatusMap is an alias for NodeToStatusReader to keep partial backwards compatibility.
@@ -132,7 +132,7 @@ func (m *NodeToStatus) ForEachExplicitNode(fn func(nodeName string, status *Stat
 // and filtered using NodeToStatus.Get.
 // If the absentNodesStatus doesn't match the code, nodeToStatus map is used to create a list of nodes
 // and nodeLister.Get is used to obtain NodeInfo for each.
-func (m *NodeToStatus) NodesForStatusCode(nodeLister NodeInfoLister, code Code) ([]*NodeInfo, error) {
+func (m *NodeToStatus) NodesForStatusCode(logger klog.Logger, nodeLister NodeInfoLister, code Code) ([]*NodeInfo, error) {
 	var resultNodes []*NodeInfo
 
 	if m.AbsentNodesStatus().Code() == code {
@@ -156,9 +156,12 @@ func (m *NodeToStatus) NodesForStatusCode(nodeLister NodeInfoLister, code Code) 
 
 	m.ForEachExplicitNode(func(nodeName string, status *Status) {
 		if status.Code() == code {
-			if nodeInfo, err := nodeLister.Get(nodeName); err == nil {
-				resultNodes = append(resultNodes, nodeInfo)
+			nodeInfo, err := nodeLister.Get(nodeName)
+			if err != nil {
+				logger.Error(err, "Failed to get node info", "nodeName", nodeName)
+				return
 			}
+			resultNodes = append(resultNodes, nodeInfo)
 		}
 	})
 

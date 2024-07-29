@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"k8s.io/apimachinery/pkg/util/sets"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
+	"k8s.io/kubernetes/test/utils/ktesting"
 )
 
 var errorStatus = NewStatus(Error, "internal error")
@@ -353,13 +354,14 @@ func TestNodesForStatusCode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			logger, _ := ktesting.NewTestContext(t)
 			var nodeInfos nodeInfoLister
 			for _, name := range nodeNames {
 				ni := NewNodeInfo()
 				ni.SetNode(st.MakeNode().Name(name).Obj())
 				nodeInfos = append(nodeInfos, ni)
 			}
-			nodes, err := tt.nodesStatuses.NodesForStatusCode(nodeInfos, tt.code)
+			nodes, err := tt.nodesStatuses.NodesForStatusCode(logger, nodeInfos, tt.code)
 			if err != nil {
 				t.Fatalf("Failed to get nodes for status code: %s", err)
 			}

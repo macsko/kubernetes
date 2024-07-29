@@ -221,7 +221,7 @@ func (ev *Evaluator) findCandidates(ctx context.Context, allNodes []*framework.N
 	}
 	logger := klog.FromContext(ctx)
 	// Get a list of nodes with failed predicates (Unschedulable) that may be satisfied by removing pods from the node.
-	potentialNodes, err := m.NodesForStatusCode(ev.Handler.SnapshotSharedLister().NodeInfos(), framework.Unschedulable)
+	potentialNodes, err := m.NodesForStatusCode(logger, ev.Handler.SnapshotSharedLister().NodeInfos(), framework.Unschedulable)
 	if err != nil {
 		return nil, nil, err
 	}
