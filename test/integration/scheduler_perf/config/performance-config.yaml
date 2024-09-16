@@ -1383,3 +1383,45 @@
     params:
       gatedPods: 10000
       measurePods: 20000
+
+# This test case is used to measure queueing hints performance when handling AssignedPodDelete event.
+- name: EventHandlingPodDelete
+  featureGates:
+    SchedulerQueueingHints: true
+  workloadTemplate:
+  - opcode: createNodes
+    countParam: $initNodes
+    nodeTemplatePath: config/templates/node-default.yaml
+    nodeAllocatableStrategy:
+      nodeAllocatable:
+        attachable-volumes-csi-ebs.csi.aws.com: "10"
+      csiNodeAllocatable:
+        ebs.csi.aws.com:
+          count: 10
+  # Create pods that will block the next ones using multiple plugins.
+  # Delete the pods at some ratio to unlock the scheduling.
+  - opcode: createPods
+    countParam: $blockerPods
+    podTemplatePath: config/event_handling/delete-pod-blocker.yaml
+    persistentVolumeTemplatePath: config/templates/pv-csi.yaml
+    persistentVolumeClaimTemplatePath: config/templates/pvc.yaml
+    deletePodsPerSecond: 100
+  - opcode: createPods
+    countParam: $measurePods
+    podTemplatePath: config/event_handling/delete-pod-unsched.yaml
+    persistentVolumeTemplatePath: config/templates/pv-csi.yaml
+    persistentVolumeClaimTemplatePath: config/templates/pvc.yaml
+    collectMetrics: true
+  workloads:
+  - name: 1Node_10Pods
+    labels: [integration-test, fast]
+    params:
+      initNodes: 1
+      blockerPods: 10
+      measurePods: 10
+  - name: 500Nodes_5000Pods
+    labels: [performance, fast]
+    params:
+      initNodes: 500
+      blockerPods: 5000 # must be initNodes * 10
+      measurePods: 5000 # must be initNodes * 10

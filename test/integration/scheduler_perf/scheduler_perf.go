@@ -98,6 +98,7 @@ const (
 	extensionPointsLabelName = "extension_point"
 	resultLabelName          = "result"
 	pluginLabelName          = "plugin"
+	eventLabelName           = "event"
 )
 
 // Run with -v=2, this is the default log level in production.
@@ -149,6 +150,22 @@ var (
 					values: metrics.ExtentionPoints,
 				},
 			},
+			"scheduler_queueing_hint_execution_duration_seconds": {
+				{
+					label:  pluginLabelName,
+					values: PluginNames,
+				},
+				{
+					label:  eventLabelName,
+					values: clusterEventsToLabels(schedframework.AllEvents),
+				},
+			},
+			"scheduler_event_handling_duration_seconds": {
+				{
+					label:  eventLabelName,
+					values: clusterEventsToLabels(schedframework.AllEvents),
+				},
+			},
 		},
 	}
 
@@ -176,6 +193,14 @@ var (
 		names.VolumeZone,
 	}
 )
+
+func clusterEventsToLabels(events []schedframework.ClusterEvent) []string {
+	labels := make([]string, 0, len(events))
+	for _, event := range events {
+		labels = append(labels, event.Label)
+	}
+	return labels
+}
 
 // testCase defines a set of test cases that intends to test the performance of
 // similar workloads of varying sizes with shared overall settings such as
@@ -1218,6 +1243,7 @@ func runWorkload(tCtx ktesting.TContext, tc *testCase, w *workload, informerFact
 
 				wg.Add(1)
 				go func() {
+					time.Sleep(3 * time.Second)
 					defer wg.Done()
 					for i := 0; i < len(pods); i++ {
 						select {
