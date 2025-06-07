@@ -24,6 +24,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
+	fwk "k8s.io/kube-scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/backend/heap"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/metrics"
@@ -48,8 +49,8 @@ type activeQueuer interface {
 	listInFlightEvents() []interface{}
 	listInFlightPods() []*v1.Pod
 	clusterEventsForPod(logger klog.Logger, pInfo *framework.QueuedPodInfo) ([]*clusterEvent, error)
-	addEventsIfPodInFlight(oldPod, newPod *v1.Pod, events []framework.ClusterEvent) bool
-	addEventIfAnyInFlight(oldObj, newObj interface{}, event framework.ClusterEvent) bool
+	addEventsIfPodInFlight(oldPod, newPod *v1.Pod, events []fwk.ClusterEvent) bool
+	addEventIfAnyInFlight(oldObj, newObj interface{}, event fwk.ClusterEvent) bool
 
 	schedulingCycle() int64
 	done(pod types.UID)
@@ -383,14 +384,14 @@ func (aq *activeQueue) clusterEventsForPod(logger klog.Logger, pInfo *framework.
 
 // addEventsIfPodInFlight adds clusterEvent to inFlightEvents if the newPod is in inFlightPods.
 // It returns true if pushed the event to the inFlightEvents.
-func (aq *activeQueue) addEventsIfPodInFlight(oldPod, newPod *v1.Pod, events []framework.ClusterEvent) bool {
+func (aq *activeQueue) addEventsIfPodInFlight(oldPod, newPod *v1.Pod, events []fwk.ClusterEvent) bool {
 	aq.lock.Lock()
 	defer aq.lock.Unlock()
 
 	_, ok := aq.inFlightPods[newPod.UID]
 	if ok {
 		for _, event := range events {
-			aq.metricsRecorder.ObserveInFlightEventsAsync(event.Label(), 1, false)
+			aq.metricsRecorder.ObserveInFlightEventsAsync(event.GetLabel(), 1, false)
 			aq.inFlightEvents.PushBack(&clusterEvent{
 				event:  event,
 				oldObj: oldPod,
@@ -403,12 +404,12 @@ func (aq *activeQueue) addEventsIfPodInFlight(oldPod, newPod *v1.Pod, events []f
 
 // addEventIfAnyInFlight adds clusterEvent to inFlightEvents if any pod is in inFlightPods.
 // It returns true if pushed the event to the inFlightEvents.
-func (aq *activeQueue) addEventIfAnyInFlight(oldObj, newObj interface{}, event framework.ClusterEvent) bool {
+func (aq *activeQueue) addEventIfAnyInFlight(oldObj, newObj interface{}, event fwk.ClusterEvent) bool {
 	aq.lock.Lock()
 	defer aq.lock.Unlock()
 
 	if len(aq.inFlightPods) != 0 {
-		aq.metricsRecorder.ObserveInFlightEventsAsync(event.Label(), 1, false)
+		aq.metricsRecorder.ObserveInFlightEventsAsync(event.GetLabel(), 1, false)
 		aq.inFlightEvents.PushBack(&clusterEvent{
 			event:  event,
 			oldObj: oldObj,
@@ -465,7 +466,7 @@ func (aq *activeQueue) unlockedDone(pod types.UID) {
 			break
 		}
 		aq.inFlightEvents.Remove(e)
-		aggrMetricsCounter[ev.event.Label()]--
+		aggrMetricsCounter[ev.event.GetLabel()]--
 	}
 
 	for evLabel, count := range aggrMetricsCounter {
