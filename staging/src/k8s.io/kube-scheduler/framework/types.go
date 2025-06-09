@@ -224,16 +224,16 @@ type ClusterEvent struct {
 	Resource   EventResource
 	ActionType ActionType
 
-	// Label describes this cluster event.
-	// It's an optional field to control String(), which is used in logging and metrics.
+	// CustomLabel describes this cluster event.
+	// It's an optional field to control Label(), which is used in logging and metrics.
 	// Normally, it's not necessary to set this field; only used for special events like UnschedulableTimeout.
-	Label string
+	CustomLabel string
 }
 
 // Label is used for logging and metrics.
-func (ce ClusterEvent) GetLabel() string {
-	if ce.Label != "" {
-		return ce.Label
+func (ce ClusterEvent) Label() string {
+	if ce.CustomLabel != "" {
+		return ce.CustomLabel
 	}
 
 	return fmt.Sprintf("%v%v", ce.Resource, ce.ActionType)

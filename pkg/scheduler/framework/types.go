@@ -84,17 +84,14 @@ func AllClusterEventLabels() []string {
 	labels := []string{UnschedulableTimeout, ForceActivate}
 	for _, r := range allResources {
 		for _, a := range basicActionTypes {
-			labels = append(labels, fwk.ClusterEvent{Resource: r, ActionType: a}.GetLabel())
+			labels = append(labels, fwk.ClusterEvent{Resource: r, ActionType: a}.Label())
 		}
-		if r == fwk.Pod {
-			for _, a := range podActionTypes {
-				labels = append(labels, fwk.ClusterEvent{Resource: r, ActionType: a}.GetLabel())
-			}
-		} else if r == fwk.Node {
-			for _, a := range nodeActionTypes {
-				labels = append(labels, fwk.ClusterEvent{Resource: r, ActionType: a}.GetLabel())
-			}
-		}
+	}
+	for _, a := range podActionTypes {
+		labels = append(labels, fwk.ClusterEvent{Resource: fwk.Pod, ActionType: a}.Label())
+	}
+	for _, a := range nodeActionTypes {
+		labels = append(labels, fwk.ClusterEvent{Resource: fwk.Node, ActionType: a}.Label())
 	}
 	return labels
 }

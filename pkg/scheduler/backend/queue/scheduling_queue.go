@@ -441,7 +441,7 @@ func (p *PriorityQueue) isPodWorthRequeuing(logger klog.Logger, pInfo *framework
 			if pod, ok := newObj.(*v1.Pod); !ok || pod.UID != pInfo.Pod.UID {
 				// This wildcard event is not for this Pod.
 				if ok {
-					logger.V(6).Info("Not worth requeuing because the event is wildcard, but for another pod", "pod", klog.KObj(pInfo.Pod), "event", event.GetLabel(), "newObj", klog.KObj(pod))
+					logger.V(6).Info("Not worth requeuing because the event is wildcard, but for another pod", "pod", klog.KObj(pInfo.Pod), "event", event.Label(), "newObj", klog.KObj(pod))
 				}
 				return queueSkip
 			}
@@ -449,7 +449,7 @@ func (p *PriorityQueue) isPodWorthRequeuing(logger klog.Logger, pInfo *framework
 
 		// If the wildcard event is special one as someone wants to force all Pods to move to activeQ/backoffQ.
 		// We return queueAfterBackoff in this case, while resetting all blocked plugins.
-		logger.V(6).Info("Worth requeuing because the event is wildcard", "pod", klog.KObj(pInfo.Pod), "event", event.GetLabel())
+		logger.V(6).Info("Worth requeuing because the event is wildcard", "pod", klog.KObj(pInfo.Pod), "event", event.Label())
 		return queueAfterBackoff
 	}
 
@@ -486,7 +486,7 @@ func (p *PriorityQueue) isPodWorthRequeuing(logger klog.Logger, pInfo *framework
 				}
 				hint = fwk.Queue
 			}
-			p.metricsRecorder.ObserveQueueingHintDurationAsync(hintfn.PluginName, event.GetLabel(), queueingHintToLabel(hint, err), metrics.SinceInSeconds(start))
+			p.metricsRecorder.ObserveQueueingHintDurationAsync(hintfn.PluginName, event.Label(), queueingHintToLabel(hint, err), metrics.SinceInSeconds(start))
 
 			if hint == fwk.QueueSkip {
 				continue
@@ -636,7 +636,7 @@ func (p *PriorityQueue) moveToActiveQ(logger klog.Logger, pInfo *framework.Queue
 		p.unschedulablePods.delete(pInfo.Pod, gatedBefore)
 		p.backoffQ.delete(pInfo)
 		logger.V(5).Info("Pod moved to an internal scheduling queue", "pod", klog.KObj(pInfo.Pod), "event", event, "queue", activeQ)
-		if event == framework.EventUnscheduledPodAdd.GetLabel() || event == framework.EventUnscheduledPodUpdate.GetLabel() {
+		if event == framework.EventUnscheduledPodAdd.Label() || event == framework.EventUnscheduledPodUpdate.Label() {
 			p.AddNominatedPod(logger, pInfo.PodInfo, nil)
 		}
 	})
@@ -672,7 +672,7 @@ func (p *PriorityQueue) Add(logger klog.Logger, pod *v1.Pod) {
 	defer p.lock.Unlock()
 
 	pInfo := p.newQueuedPodInfo(pod)
-	if added := p.moveToActiveQ(logger, pInfo, framework.EventUnscheduledPodAdd.GetLabel()); added {
+	if added := p.moveToActiveQ(logger, pInfo, framework.EventUnscheduledPodAdd.Label()); added {
 		p.activeQ.broadcast()
 	}
 }
@@ -758,7 +758,7 @@ func (p *PriorityQueue) determineSchedulingHintForInFlightPod(logger klog.Logger
 	// check if there is an event that makes this Pod schedulable based on pInfo.UnschedulablePlugins.
 	queueingStrategy := queueSkip
 	for _, e := range events {
-		logger.V(5).Info("Checking event for in-flight pod", "pod", klog.KObj(pInfo.Pod), "event", e.event.GetLabel())
+		logger.V(5).Info("Checking event for in-flight pod", "pod", klog.KObj(pInfo.Pod), "event", e.event.Label())
 
 		switch p.isPodWorthRequeuing(logger, pInfo, e.event, e.oldObj, e.newObj) {
 		case queueSkip:
@@ -1015,9 +1015,9 @@ func (p *PriorityQueue) Update(logger klog.Logger, oldPod, newPod *v1.Pod) {
 			// if the rejection from them could be resolved by updating unscheduled Pods itself.
 			for _, evt := range events {
 				hint := p.isPodWorthRequeuing(logger, pInfo, evt, oldPod, newPod)
-				queue := p.requeuePodWithQueueingStrategy(logger, pInfo, hint, evt.GetLabel())
+				queue := p.requeuePodWithQueueingStrategy(logger, pInfo, hint, evt.Label())
 				if queue != unschedulablePods {
-					logger.V(5).Info("Pod moved to an internal scheduling queue because the Pod is updated", "pod", klog.KObj(newPod), "event", evt.GetLabel(), "queue", queue)
+					logger.V(5).Info("Pod moved to an internal scheduling queue because the Pod is updated", "pod", klog.KObj(newPod), "event", evt.Label(), "queue", queue)
 					p.unschedulablePods.delete(pInfo.Pod, gated)
 				}
 				if queue == activeQ || (p.isPopFromBackoffQEnabled && queue == backoffQ) {
@@ -1031,7 +1031,7 @@ func (p *PriorityQueue) Update(logger klog.Logger, oldPod, newPod *v1.Pod) {
 			// Pod might have completed its backoff time while being in unschedulablePods,
 			// so we should check isPodBackingoff before moving the pod to backoffQ.
 			if p.backoffQ.isPodBackingoff(pInfo) {
-				if added := p.moveToBackoffQ(logger, pInfo, framework.EventUnscheduledPodUpdate.GetLabel()); added {
+				if added := p.moveToBackoffQ(logger, pInfo, framework.EventUnscheduledPodUpdate.Label()); added {
 					p.unschedulablePods.delete(pInfo.Pod, gated)
 					if p.isPopFromBackoffQEnabled {
 						p.activeQ.broadcast()
@@ -1040,19 +1040,19 @@ func (p *PriorityQueue) Update(logger klog.Logger, oldPod, newPod *v1.Pod) {
 				return
 			}
 
-			if added := p.moveToActiveQ(logger, pInfo, framework.EventUnscheduledPodUpdate.GetLabel()); added {
+			if added := p.moveToActiveQ(logger, pInfo, framework.EventUnscheduledPodUpdate.Label()); added {
 				p.activeQ.broadcast()
 			}
 			return
 		}
 
 		// Pod update didn't make it schedulable, keep it in the unschedulable queue.
-		p.unschedulablePods.addOrUpdate(pInfo, framework.EventUnscheduledPodUpdate.GetLabel())
+		p.unschedulablePods.addOrUpdate(pInfo, framework.EventUnscheduledPodUpdate.Label())
 		return
 	}
 	// If pod is not in any of the queues, we put it in the active queue.
 	pInfo := p.newQueuedPodInfo(newPod)
-	if added := p.moveToActiveQ(logger, pInfo, framework.EventUnscheduledPodUpdate.GetLabel()); added {
+	if added := p.moveToActiveQ(logger, pInfo, framework.EventUnscheduledPodUpdate.Label()); added {
 		p.activeQ.broadcast()
 	}
 }
@@ -1178,13 +1178,13 @@ func (p *PriorityQueue) movePodsToActiveOrBackoffQueue(logger klog.Logger, podIn
 		schedulingHint := p.isPodWorthRequeuing(logger, pInfo, event, oldObj, newObj)
 		if schedulingHint == queueSkip {
 			// QueueingHintFn determined that this Pod isn't worth putting to activeQ or backoffQ by this event.
-			logger.V(5).Info("Event is not making pod schedulable", "pod", klog.KObj(pInfo.Pod), "event", event.GetLabel())
+			logger.V(5).Info("Event is not making pod schedulable", "pod", klog.KObj(pInfo.Pod), "event", event.Label())
 			continue
 		}
 
 		p.unschedulablePods.delete(pInfo.Pod, pInfo.Gated())
-		queue := p.requeuePodWithQueueingStrategy(logger, pInfo, schedulingHint, event.GetLabel())
-		logger.V(4).Info("Pod moved to an internal scheduling queue", "pod", klog.KObj(pInfo.Pod), "event", event.GetLabel(), "queue", queue, "hint", schedulingHint)
+		queue := p.requeuePodWithQueueingStrategy(logger, pInfo, schedulingHint, event.Label())
+		logger.V(4).Info("Pod moved to an internal scheduling queue", "pod", klog.KObj(pInfo.Pod), "event", event.Label(), "queue", queue, "hint", schedulingHint)
 		if queue == activeQ || (p.isPopFromBackoffQEnabled && queue == backoffQ) {
 			activated = true
 		}
@@ -1197,7 +1197,7 @@ func (p *PriorityQueue) movePodsToActiveOrBackoffQueue(logger klog.Logger, podIn
 		// AddUnschedulableIfNotPresent we need to know whether events were
 		// observed while scheduling them.
 		if added := p.activeQ.addEventIfAnyInFlight(oldObj, newObj, event); added {
-			logger.V(5).Info("Event received while pods are in flight", "event", event.GetLabel())
+			logger.V(5).Info("Event received while pods are in flight", "event", event.Label())
 		}
 	}
 

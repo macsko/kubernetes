@@ -52,7 +52,7 @@ import (
 func (sched *Scheduler) addNodeToCache(obj interface{}) {
 	evt := fwk.ClusterEvent{Resource: fwk.Node, ActionType: fwk.Add}
 	start := time.Now()
-	defer metrics.EventHandlingLatency.WithLabelValues(evt.GetLabel()).Observe(metrics.SinceInSeconds(start))
+	defer metrics.EventHandlingLatency.WithLabelValues(evt.Label()).Observe(metrics.SinceInSeconds(start))
 	logger := sched.logger
 	node, ok := obj.(*v1.Node)
 	if !ok {
@@ -92,14 +92,14 @@ func (sched *Scheduler) updateNodeInCache(oldObj, newObj interface{}) {
 		sched.SchedulingQueue.MoveAllToActiveOrBackoffQueue(logger, evt, oldNode, newNode, preCheckForNode(nodeInfo))
 		movingDuration := metrics.SinceInSeconds(startMoving)
 
-		metrics.EventHandlingLatency.WithLabelValues(evt.GetLabel()).Observe(updatingDuration + movingDuration)
+		metrics.EventHandlingLatency.WithLabelValues(evt.Label()).Observe(updatingDuration + movingDuration)
 	}
 }
 
 func (sched *Scheduler) deleteNodeFromCache(obj interface{}) {
 	evt := fwk.ClusterEvent{Resource: fwk.Node, ActionType: fwk.Delete}
 	start := time.Now()
-	defer metrics.EventHandlingLatency.WithLabelValues(evt.GetLabel()).Observe(metrics.SinceInSeconds(start))
+	defer metrics.EventHandlingLatency.WithLabelValues(evt.Label()).Observe(metrics.SinceInSeconds(start))
 
 	logger := sched.logger
 	var node *v1.Node
@@ -128,7 +128,7 @@ func (sched *Scheduler) deleteNodeFromCache(obj interface{}) {
 
 func (sched *Scheduler) addPodToSchedulingQueue(obj interface{}) {
 	start := time.Now()
-	defer metrics.EventHandlingLatency.WithLabelValues(framework.EventUnscheduledPodAdd.GetLabel()).Observe(metrics.SinceInSeconds(start))
+	defer metrics.EventHandlingLatency.WithLabelValues(framework.EventUnscheduledPodAdd.Label()).Observe(metrics.SinceInSeconds(start))
 
 	logger := sched.logger
 	pod := obj.(*v1.Pod)
@@ -146,10 +146,10 @@ func (sched *Scheduler) updatePodInSchedulingQueue(oldObj, newObj interface{}) {
 		return
 	}
 
-	defer metrics.EventHandlingLatency.WithLabelValues(framework.EventUnscheduledPodUpdate.GetLabel()).Observe(metrics.SinceInSeconds(start))
+	defer metrics.EventHandlingLatency.WithLabelValues(framework.EventUnscheduledPodUpdate.Label()).Observe(metrics.SinceInSeconds(start))
 	for _, evt := range framework.PodSchedulingPropertiesChange(newPod, oldPod) {
-		if evt.GetLabel() != framework.EventUnscheduledPodUpdate.GetLabel() {
-			defer metrics.EventHandlingLatency.WithLabelValues(evt.GetLabel()).Observe(metrics.SinceInSeconds(start))
+		if evt.Label() != framework.EventUnscheduledPodUpdate.Label() {
+			defer metrics.EventHandlingLatency.WithLabelValues(evt.Label()).Observe(metrics.SinceInSeconds(start))
 		}
 	}
 
@@ -177,7 +177,7 @@ func hasNominatedNodeNameChanged(oldPod, newPod *v1.Pod) bool {
 
 func (sched *Scheduler) deletePodFromSchedulingQueue(obj interface{}) {
 	start := time.Now()
-	defer metrics.EventHandlingLatency.WithLabelValues(framework.EventUnscheduledPodDelete.GetLabel()).Observe(metrics.SinceInSeconds(start))
+	defer metrics.EventHandlingLatency.WithLabelValues(framework.EventUnscheduledPodDelete.Label()).Observe(metrics.SinceInSeconds(start))
 
 	logger := sched.logger
 	var pod *v1.Pod
@@ -228,7 +228,7 @@ func getLEPriorityPreCheck(priority int32) queue.PreEnqueueCheck {
 
 func (sched *Scheduler) addPodToCache(obj interface{}) {
 	start := time.Now()
-	defer metrics.EventHandlingLatency.WithLabelValues(framework.EventAssignedPodAdd.GetLabel()).Observe(metrics.SinceInSeconds(start))
+	defer metrics.EventHandlingLatency.WithLabelValues(framework.EventAssignedPodAdd.Label()).Observe(metrics.SinceInSeconds(start))
 
 	logger := sched.logger
 	pod, ok := obj.(*v1.Pod)
@@ -260,7 +260,7 @@ func (sched *Scheduler) addPodToCache(obj interface{}) {
 
 func (sched *Scheduler) updatePodInCache(oldObj, newObj interface{}) {
 	start := time.Now()
-	defer metrics.EventHandlingLatency.WithLabelValues(framework.EventAssignedPodUpdate.GetLabel()).Observe(metrics.SinceInSeconds(start))
+	defer metrics.EventHandlingLatency.WithLabelValues(framework.EventAssignedPodUpdate.Label()).Observe(metrics.SinceInSeconds(start))
 
 	logger := sched.logger
 	oldPod, ok := oldObj.(*v1.Pod)
@@ -301,13 +301,13 @@ func (sched *Scheduler) updatePodInCache(oldObj, newObj interface{}) {
 			sched.SchedulingQueue.AssignedPodUpdated(logger, oldPod, newPod, evt)
 		}
 		movingDuration := metrics.SinceInSeconds(startMoving)
-		metrics.EventHandlingLatency.WithLabelValues(evt.GetLabel()).Observe(updatingDuration + movingDuration)
+		metrics.EventHandlingLatency.WithLabelValues(evt.Label()).Observe(updatingDuration + movingDuration)
 	}
 }
 
 func (sched *Scheduler) deletePodFromCache(obj interface{}) {
 	start := time.Now()
-	defer metrics.EventHandlingLatency.WithLabelValues(framework.EventAssignedPodDelete.GetLabel()).Observe(metrics.SinceInSeconds(start))
+	defer metrics.EventHandlingLatency.WithLabelValues(framework.EventAssignedPodDelete.Label()).Observe(metrics.SinceInSeconds(start))
 
 	logger := sched.logger
 	var pod *v1.Pod
@@ -457,7 +457,7 @@ func addAllEventHandlers(
 			evt := fwk.ClusterEvent{Resource: resource, ActionType: fwk.Add}
 			funcs.AddFunc = func(obj interface{}) {
 				start := time.Now()
-				defer metrics.EventHandlingLatency.WithLabelValues(evt.GetLabel()).Observe(metrics.SinceInSeconds(start))
+				defer metrics.EventHandlingLatency.WithLabelValues(evt.Label()).Observe(metrics.SinceInSeconds(start))
 				if resource == fwk.StorageClass && !utilfeature.DefaultFeatureGate.Enabled(features.SchedulerQueueingHints) {
 					sc, ok := obj.(*storagev1.StorageClass)
 					if !ok {
@@ -483,7 +483,7 @@ func addAllEventHandlers(
 			funcs.UpdateFunc = func(old, obj interface{}) {
 				start := time.Now()
 				sched.SchedulingQueue.MoveAllToActiveOrBackoffQueue(logger, evt, old, obj, nil)
-				metrics.EventHandlingLatency.WithLabelValues(evt.GetLabel()).Observe(metrics.SinceInSeconds(start))
+				metrics.EventHandlingLatency.WithLabelValues(evt.Label()).Observe(metrics.SinceInSeconds(start))
 			}
 		}
 		if at&fwk.Delete != 0 {
@@ -491,7 +491,7 @@ func addAllEventHandlers(
 			funcs.DeleteFunc = func(obj interface{}) {
 				start := time.Now()
 				sched.SchedulingQueue.MoveAllToActiveOrBackoffQueue(logger, evt, obj, nil, nil)
-				metrics.EventHandlingLatency.WithLabelValues(evt.GetLabel()).Observe(metrics.SinceInSeconds(start))
+				metrics.EventHandlingLatency.WithLabelValues(evt.Label()).Observe(metrics.SinceInSeconds(start))
 			}
 		}
 		return funcs

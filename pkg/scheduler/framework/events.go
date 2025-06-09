@@ -56,9 +56,9 @@ var (
 	// EventUnscheduledPodDelete is the event when an unscheduled pod is deleted.
 	EventUnscheduledPodDelete = fwk.ClusterEvent{Resource: unschedulablePod, ActionType: fwk.Delete}
 	// EventUnschedulableTimeout is the event when a pod stays in unschedulable for longer than timeout.
-	EventUnschedulableTimeout = fwk.ClusterEvent{Resource: fwk.WildCard, ActionType: fwk.All, Label: UnschedulableTimeout}
+	EventUnschedulableTimeout = fwk.ClusterEvent{Resource: fwk.WildCard, ActionType: fwk.All, CustomLabel: UnschedulableTimeout}
 	// EventForceActivate is the event when a pod is moved from unschedulablePods/backoffQ to activeQ.
-	EventForceActivate = fwk.ClusterEvent{Resource: fwk.WildCard, ActionType: fwk.All, Label: ForceActivate}
+	EventForceActivate = fwk.ClusterEvent{Resource: fwk.WildCard, ActionType: fwk.All, CustomLabel: ForceActivate}
 )
 
 // PodSchedulingPropertiesChange interprets the update of a pod and returns corresponding UpdatePodXYZ event(s).

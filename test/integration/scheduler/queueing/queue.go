@@ -2412,14 +2412,14 @@ func RunTestCoreResourceEnqueue(t *testing.T, tt *CoreResourceEnqueueTestCase) {
 	if err := wait.PollUntilContextTimeout(ctx, time.Millisecond*200, wait.ForeverTestTimeout, false, func(ctx context.Context) (bool, error) {
 		for e, count := range wantTriggeredEvents {
 			vec, err := testutil.GetHistogramVecFromGatherer(legacyregistry.DefaultGatherer, "scheduler_event_handling_duration_seconds", map[string]string{
-				"event": string(e.GetLabel()),
+				"event": string(e.Label()),
 			})
 			if err != nil {
 				return false, err
 			}
 
 			if vec.GetAggregatedSampleCount() != count {
-				t.Logf("Expected %d sample for event %s, got %d", count, e.GetLabel(), vec.GetAggregatedSampleCount())
+				t.Logf("Expected %d sample for event %s, got %d", count, e.Label(), vec.GetAggregatedSampleCount())
 				return false, nil
 			}
 		}

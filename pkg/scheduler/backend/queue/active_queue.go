@@ -391,7 +391,7 @@ func (aq *activeQueue) addEventsIfPodInFlight(oldPod, newPod *v1.Pod, events []f
 	_, ok := aq.inFlightPods[newPod.UID]
 	if ok {
 		for _, event := range events {
-			aq.metricsRecorder.ObserveInFlightEventsAsync(event.GetLabel(), 1, false)
+			aq.metricsRecorder.ObserveInFlightEventsAsync(event.Label(), 1, false)
 			aq.inFlightEvents.PushBack(&clusterEvent{
 				event:  event,
 				oldObj: oldPod,
@@ -409,7 +409,7 @@ func (aq *activeQueue) addEventIfAnyInFlight(oldObj, newObj interface{}, event f
 	defer aq.lock.Unlock()
 
 	if len(aq.inFlightPods) != 0 {
-		aq.metricsRecorder.ObserveInFlightEventsAsync(event.GetLabel(), 1, false)
+		aq.metricsRecorder.ObserveInFlightEventsAsync(event.Label(), 1, false)
 		aq.inFlightEvents.PushBack(&clusterEvent{
 			event:  event,
 			oldObj: oldObj,
@@ -466,7 +466,7 @@ func (aq *activeQueue) unlockedDone(pod types.UID) {
 			break
 		}
 		aq.inFlightEvents.Remove(e)
-		aggrMetricsCounter[ev.event.GetLabel()]--
+		aggrMetricsCounter[ev.event.Label()]--
 	}
 
 	for evLabel, count := range aggrMetricsCounter {
