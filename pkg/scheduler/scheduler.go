@@ -40,10 +40,13 @@ import (
 	"k8s.io/kubernetes/pkg/features"
 	schedulerapi "k8s.io/kubernetes/pkg/scheduler/apis/config"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config/scheme"
+	"k8s.io/kubernetes/pkg/scheduler/backend/api_cache"
+	"k8s.io/kubernetes/pkg/scheduler/backend/api_dispatcher"
 	internalcache "k8s.io/kubernetes/pkg/scheduler/backend/cache"
 	cachedebugger "k8s.io/kubernetes/pkg/scheduler/backend/cache/debugger"
 	internalqueue "k8s.io/kubernetes/pkg/scheduler/backend/queue"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kubernetes/pkg/scheduler/framework/api_calls"
 	"k8s.io/kubernetes/pkg/scheduler/framework/parallelize"
 	frameworkplugins "k8s.io/kubernetes/pkg/scheduler/framework/plugins"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/dynamicresources"
@@ -92,6 +95,12 @@ type Scheduler struct {
 
 	// SchedulingQueue holds pods to be scheduled
 	SchedulingQueue internalqueue.SchedulingQueue
+
+	// If possible, indirect operation on APIDispatcher, e.g. through SchedulingQueue, is preferred.
+	// Is nil iff SchedulerAsyncAPICalls feature gate is disabled.
+	// Adding a call to APIDispatcher should not be done directly by in-tree usages.
+	// framework.APICache should be used instead.
+	APIDispatcher *apidispatcher.APIDispatcher
 
 	// Profiles are the scheduling profiles.
 	Profiles profile.Map
@@ -331,6 +340,12 @@ func New(ctx context.Context,
 		}
 		draManager = dynamicresources.NewDRAManager(ctx, resourceClaimCache, resourceSliceTracker, informerFactory)
 	}
+	var apiDispatcher *apidispatcher.APIDispatcher
+	var apiCache framework.APICacher
+	if utilfeature.DefaultFeatureGate.Enabled(features.SchedulerAsyncAPICalls) {
+		apiDispatcher = apidispatcher.New(client, int(options.parallelism), apicalls.Relevances)
+		apiCache = apicache.New(apiDispatcher)
+	}
 
 	profiles, err := profile.NewMap(ctx, options.profiles, registry, recorderFactory,
 		frameworkruntime.WithComponentConfigVersion(options.componentConfigVersion),
@@ -344,6 +359,8 @@ func New(ctx context.Context,
 		frameworkruntime.WithExtenders(extenders),
 		frameworkruntime.WithMetricsRecorder(metricsRecorder),
 		frameworkruntime.WithWaitingPods(waitingPods),
+		frameworkruntime.WithAPIDispatcher(apiDispatcher),
+		frameworkruntime.WithAPICacher(apiCache),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("initializing profiles: %v", err)
@@ -408,6 +425,7 @@ func New(ctx context.Context,
 		SchedulingQueue:          podQueue,
 		Profiles:                 profiles,
 		logger:                   logger,
+		APIDispatcher:            apiDispatcher,
 	}
 	sched.NextPod = podQueue.Pop
 	sched.applyDefaultHandlers()
@@ -499,6 +517,10 @@ func (sched *Scheduler) Run(ctx context.Context) {
 	logger := klog.FromContext(ctx)
 	sched.SchedulingQueue.Run(logger)
 
+	if sched.APIDispatcher != nil {
+		go sched.APIDispatcher.Run(logger)
+	}
+
 	// We need to start scheduleOne loop in a dedicated goroutine,
 	// because scheduleOne function hangs on getting the next item
 	// from the SchedulingQueue.
@@ -509,6 +531,9 @@ func (sched *Scheduler) Run(ctx context.Context) {
 
 	<-ctx.Done()
 	sched.SchedulingQueue.Close()
+	if sched.APIDispatcher != nil {
+		sched.APIDispatcher.Close()
+	}
 
 	// If the plugins satisfy the io.Closer interface, they are closed.
 	err := sched.Profiles.Close()
