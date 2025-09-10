@@ -112,6 +112,7 @@ const (
 	resultLabelName          = "result"
 	pluginLabelName          = "plugin"
 	eventLabelName           = "event"
+	hintLabelName            = "hint"
 )
 
 // Run with -v=2, this is the default log level in production.
@@ -175,6 +176,10 @@ var (
 			{
 				Label:  eventLabelName,
 				Values: schedframework.AllClusterEventLabels(),
+			},
+			{
+				Label:  hintLabelName,
+				Values: []string{metrics.QueueingHintResultQueue, metrics.QueueingHintResultQueueSkip, metrics.QueueingHintResultError},
 			},
 		},
 		"scheduler_event_handling_duration_seconds": {
