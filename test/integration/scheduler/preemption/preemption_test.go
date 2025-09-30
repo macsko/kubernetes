@@ -930,8 +930,6 @@ func TestAsyncPreemption(t *testing.T) {
 				// Register fake bind plugin that will block on binding for the specified pod name, until it receives a resume signal via the blockBindingChannel.
 				blockBindingChannel := make(chan struct{})
 				defer func() {
-					lock.Lock()
-					defer lock.Unlock()
 					close(blockBindingChannel)
 				}()
 				blockingBindPluginName := "blockingBindPlugin"
@@ -1160,7 +1158,10 @@ func (bp *BlockingBindPlugin) Name() string {
 func (bp *BlockingBindPlugin) Bind(ctx context.Context, state fwk.CycleState, p *v1.Pod, nodeName string) *fwk.Status {
 	if strings.Contains(p.Name, bp.nameOfPodToBlock) {
 		// block the bind goroutine to complete until the test case allows it to proceed.
-		<-bp.blockBindingChannel
+		select {
+		case <-bp.blockBindingChannel:
+		case <-ctx.Done():
+		}
 	}
 	return bp.realPlugin.Bind(ctx, state, p, nodeName)
 }
