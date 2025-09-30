@@ -480,6 +480,8 @@ func TestPreemption(t *testing.T) {
 }
 
 func TestAsyncPreemption(t *testing.T) {
+	const PodBlockedInBindingName = "pod-blocked-in-binding"
+
 	type createPod struct {
 		pod *v1.Pod
 		// count is the number of times the pod should be created by this action.
@@ -489,8 +491,13 @@ func TestAsyncPreemption(t *testing.T) {
 	}
 
 	type schedulePod struct {
-		podName       string
-		expectSuccess bool
+		podName             string
+		expectSuccess       bool
+		expectUnschedulable bool
+	}
+
+	type activatePod struct {
+		podName string
 	}
 
 	type scenario struct {
@@ -514,6 +521,13 @@ func TestAsyncPreemption(t *testing.T) {
 		// You should give a Pod index representing the order of Pod creation.
 		// e.g., if you want to check the Pod created first in the test case, you should give 0.
 		podRunningPreemption *int
+		// activatePod moves the pod from unschedulable to active or backoff.
+		activatePod *activatePod
+		// resumeBind resumes the binding operation that keeps the pod blocked.
+		resumeBind bool
+		// verifyPodInUnschedulable waits for some time and confirms that the given pod is in the unschedulable pool.
+		// The value is the name of the checked pod.
+		verifyPodInUnschedulable string
 	}
 
 	tests := []struct {
@@ -786,6 +800,76 @@ func TestAsyncPreemption(t *testing.T) {
 				},
 			},
 		},
+		{
+			// This scenario verifies the fix for https://github.com/kubernetes/kubernetes/issues/134249
+			// Scenario reproduces the issue:
+			// Victim pod takes long in binding. Preemptor pod attempts preemption, goes to unschedulable, then gets activated by some unknown trigger.
+			// Preemptor pod is expected to go back to unschedulable queue and remain there until victim binding and preemption is completed.
+			name: "victim blocked in binding, preemptor pod gets activated randomly and returns to unschedulable queue until victim is bound and deleted",
+			scenarios: []scenario{
+				{
+					name: "create victim Pod that is going to be blocked in binding",
+					createPod: &createPod{
+						pod: st.MakePod().Name(PodBlockedInBindingName).Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Container("image").ZeroTerminationGracePeriod().Priority(1).Obj(),
+					},
+				},
+				{
+					name: "schedule victim Pod",
+					schedulePod: &schedulePod{
+						podName: PodBlockedInBindingName,
+					},
+				},
+				{
+					name: "create a preemptor Pod",
+					createPod: &createPod{
+						pod: st.MakePod().Name("preemptor").Req(map[v1.ResourceName]string{v1.ResourceCPU: "4"}).Container("image").Priority(100).Obj(),
+					},
+				},
+				{
+					name: "schedule the preemptor Pod",
+					schedulePod: &schedulePod{
+						podName:             "preemptor",
+						expectUnschedulable: true,
+					},
+				},
+				{
+					name:               "complete the preemption API call",
+					completePreemption: "preemptor",
+				},
+				{
+					name: "activate preemptor Pod, simulating a random event that activated it",
+					activatePod: &activatePod{
+						podName: "preemptor",
+					},
+				},
+				{
+					name: "schedule the preemptor Pod again and expect it to end up in unschedulable (waiting for preemption to finish)",
+					schedulePod: &schedulePod{
+						podName:             "preemptor",
+						expectUnschedulable: true,
+					},
+				},
+				{
+					name:               "complete the preemption API call",
+					completePreemption: "preemptor",
+				},
+				{
+					name:                     "check that preemptor remained in unschedulable queue",
+					verifyPodInUnschedulable: "preemptor",
+				},
+				{
+					name:       "resume binding of the blocked pod",
+					resumeBind: true,
+				},
+				{
+					name: "schedule the preemptor Pod after the completed binding and preemption of the blocked pod",
+					schedulePod: &schedulePod{
+						podName:       "preemptor",
+						expectSuccess: true,
+					},
+				},
+			},
+		},
 	}
 
 	// All test cases have the same node.
@@ -842,16 +926,44 @@ func TestAsyncPreemption(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Error registering a filter: %v", err)
 				}
+
+				// Register fake bind plugin that will block on binding for the specified pod name, until it receives a resume signal via the blockBindingChannel.
+				blockBindingChannel := make(chan struct{})
+				defer func() {
+					lock.Lock()
+					defer lock.Unlock()
+					close(blockBindingChannel)
+				}()
+				blockingBindPluginName := "blockingBindPlugin"
+				err = registry.Register(blockingBindPluginName, func(ctx context.Context, o runtime.Object, fh fwk.Handle) (fwk.Plugin, error) {
+					db, err := defaultbinder.New(ctx, o, fh)
+					if err != nil {
+						t.Fatalf("Error creating a default binder plugin: %v", err)
+					}
+					var bindPlugin = BlockingBindPlugin{
+						name:                blockingBindPluginName,
+						nameOfPodToBlock:    PodBlockedInBindingName,
+						realPlugin:          db.(fwk.BindPlugin),
+						blockBindingChannel: blockBindingChannel,
+					}
+					return &bindPlugin, nil
+				})
+				if err != nil {
+					t.Fatalf("Error registering a bind plugin: %v", err)
+				}
+
 				cfg := configtesting.V1ToInternalWithDefaults(t, configv1.KubeSchedulerConfiguration{
 					Profiles: []configv1.KubeSchedulerProfile{{
 						SchedulerName: ptr.To(v1.DefaultSchedulerName),
 						Plugins: &configv1.Plugins{
 							MultiPoint: configv1.PluginSet{
 								Enabled: []configv1.Plugin{
+									{Name: blockingBindPluginName},
 									{Name: delayedPreemptionPluginName},
 								},
 								Disabled: []configv1.Plugin{
 									{Name: names.DefaultPreemption},
+									{Name: names.DefaultBinder},
 								},
 							},
 						},
@@ -939,15 +1051,24 @@ func TestAsyncPreemption(t *testing.T) {
 						preemptionDoneChannels[scenario.schedulePod.podName] = make(chan struct{})
 						lock.Unlock()
 						testCtx.Scheduler.ScheduleOne(testCtx.Ctx)
+
 						if scenario.schedulePod.expectSuccess {
 							if err := wait.PollUntilContextTimeout(testCtx.Ctx, 200*time.Millisecond, wait.ForeverTestTimeout, false, testutils.PodScheduled(cs, testCtx.NS.Name, scenario.schedulePod.podName)); err != nil {
 								t.Fatalf("Expected the pod %s to be scheduled", scenario.schedulePod.podName)
 							}
-						} else {
+						} else if scenario.schedulePod.expectUnschedulable {
 							if !podInUnschedulablePodPool(t, testCtx.Scheduler.SchedulingQueue, scenario.schedulePod.podName) {
-								t.Fatalf("Expected the pod %s to be in the queue after the scheduling attempt", scenario.schedulePod.podName)
+								t.Fatalf("Expected the pod %s to be in the unschedulable queue after the scheduling attempt", scenario.schedulePod.podName)
 							}
 						}
+					case scenario.activatePod != nil:
+						pod := unschedulablePod(t, testCtx.Scheduler.SchedulingQueue, scenario.activatePod.podName)
+						if pod == nil {
+							t.Fatalf("Expected the pod  %s to be in unschedulable queue before activation phase", scenario.activatePod.podName)
+						}
+						m := make(map[string]*v1.Pod)
+						m[scenario.activatePod.podName] = pod
+						testCtx.Scheduler.SchedulingQueue.Activate(logger, m)
 					case scenario.completePreemption != "":
 						lock.Lock()
 						if _, ok := preemptionDoneChannels[scenario.completePreemption]; !ok {
@@ -974,6 +1095,16 @@ func TestAsyncPreemption(t *testing.T) {
 							return preemptionPlugin.Evaluator.IsPodRunningPreemption(createdPods[*scenario.podRunningPreemption].GetUID()), nil
 						}); err != nil {
 							t.Fatalf("Expected the pod %s to be running preemption", createdPods[*scenario.podRunningPreemption].Name)
+						}
+					case scenario.resumeBind:
+						lock.Lock()
+						blockBindingChannel <- struct{}{}
+						lock.Unlock()
+					case scenario.verifyPodInUnschedulable != "":
+						// Wait for some time to make sure that the pod remains in unschedulable and is not immediately re-activated.
+						time.Sleep(200 * time.Millisecond)
+						if !podInUnschedulablePodPool(t, testCtx.Scheduler.SchedulingQueue, scenario.verifyPodInUnschedulable) {
+							t.Fatalf("Expected the pod %s to be in the unschedulable queue after the scheduling attempt", scenario.verifyPodInUnschedulable)
 						}
 					}
 				}
@@ -1013,9 +1144,12 @@ func unschedulablePod(t *testing.T, queue queue.SchedulingQueue, podName string)
 	return nil
 }
 
+/*
 // This test verifies the fix for https://github.com/kubernetes/kubernetes/issues/134249
 // This function is similar to TestAsyncPreemption, but it's a separate func because of the added complexity (fake binding plugin and different scenarios used).
 func TestAsyncPreemptionWhenVictimIsBlockedInBinding(t *testing.T) {
+	const PodBlockedInBindingName = "pod-blocked-in-binding"
+
 	type createPod struct {
 		pod *v1.Pod
 		// count is the number of times the pod should be created by this action.
@@ -1071,14 +1205,13 @@ func TestAsyncPreemptionWhenVictimIsBlockedInBinding(t *testing.T) {
 				{
 					name: "create victim Pod that is going to be blocked in binding",
 					createPod: &createPod{
-						pod:   st.MakePod().Name("pod-blocked-in-binding").Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Container("image").ZeroTerminationGracePeriod().Priority(1).Obj(),
-						count: ptr.To(1),
+						pod: st.MakePod().Name(PodBlockedInBindingName).Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Container("image").ZeroTerminationGracePeriod().Priority(1).Obj(),
 					},
 				},
 				{
 					name: "schedule victim Pod",
 					schedulePod: &schedulePod{
-						podName: "pod-blocked-in-binding",
+						podName: PodBlockedInBindingName,
 					},
 				},
 				{
@@ -1204,7 +1337,7 @@ func TestAsyncPreemptionWhenVictimIsBlockedInBinding(t *testing.T) {
 					}
 					var bindPlugin = BlockingBindPlugin{
 						name:                blockingBindPluginName,
-						nameOfPodToBlock:    "pod-blocked-in-binding",
+						nameOfPodToBlock:    PodBlockedInBindingName,
 						realPlugin:          db.(fwk.BindPlugin),
 						blockBindingChannel: blockBindingChannel,
 					}
@@ -1376,7 +1509,7 @@ func TestAsyncPreemptionWhenVictimIsBlockedInBinding(t *testing.T) {
 		}
 	}
 }
-
+*/
 // BlockingBindPlugin is a fake plugin that simulates a long binding operation.
 // Underneath it calls realPlugin.Bind(), after receiving a signal that binding can be unblocked.
 type BlockingBindPlugin struct {
