@@ -480,7 +480,7 @@ func TestPreemption(t *testing.T) {
 }
 
 func TestAsyncPreemption(t *testing.T) {
-	const PodBlockedInBindingName = "pod-blocked-in-binding"
+	const podBlockedInBindingName = "pod-blocked-in-binding"
 
 	type createPod struct {
 		pod *v1.Pod
@@ -524,6 +524,7 @@ func TestAsyncPreemption(t *testing.T) {
 		// activatePod moves the pod from unschedulable to active or backoff.
 		activatePod *activatePod
 		// resumeBind resumes the binding operation that keeps the pod blocked.
+		// Note: The pod will only become blocked in the first place, if pod name matches string defined in podBlockedInBinding.
 		resumeBind bool
 		// verifyPodInUnschedulable waits for some time and confirms that the given pod is in the unschedulable pool.
 		// The value is the name of the checked pod.
@@ -555,7 +556,8 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "schedule the preemptor Pod",
 					schedulePod: &schedulePod{
-						podName: "preemptor",
+						podName:             "preemptor",
+						expectUnschedulable: true,
 					},
 				},
 				{
@@ -598,7 +600,8 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "schedule the preemptor Pod",
 					schedulePod: &schedulePod{
-						podName: "preemptor-high-priority",
+						podName:             "preemptor-high-priority",
+						expectUnschedulable: true,
 					},
 				},
 				{
@@ -620,7 +623,8 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "schedule the mid-priority Pod",
 					schedulePod: &schedulePod{
-						podName: "pod-mid-priority",
+						podName:             "pod-mid-priority",
+						expectUnschedulable: true,
 					},
 				},
 				{
@@ -638,7 +642,8 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "schedule the mid-priority Pod again",
 					schedulePod: &schedulePod{
-						podName: "pod-mid-priority",
+						podName:             "pod-mid-priority",
+						expectUnschedulable: true,
 					},
 				},
 			},
@@ -662,7 +667,8 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "schedule the preemptor Pod",
 					schedulePod: &schedulePod{
-						podName: "preemptor-high-priority",
+						podName:             "preemptor-high-priority",
+						expectUnschedulable: true,
 					},
 				},
 				{
@@ -684,7 +690,8 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "schedule the super-high-priority Pod",
 					schedulePod: &schedulePod{
-						podName: "preemptor-super-high-priority",
+						podName:             "preemptor-super-high-priority",
+						expectUnschedulable: true,
 					},
 				},
 				{
@@ -716,7 +723,8 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "schedule the high-priority Pod",
 					schedulePod: &schedulePod{
-						podName: "preemptor-high-priority",
+						podName:             "preemptor-high-priority",
+						expectUnschedulable: true,
 					},
 				},
 			},
@@ -741,7 +749,8 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "schedule the preemptor Pod",
 					schedulePod: &schedulePod{
-						podName: "preemptor-high-priority",
+						podName:             "preemptor-high-priority",
+						expectUnschedulable: true,
 					},
 				},
 				{
@@ -764,7 +773,8 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "schedule the mid-priority Pod",
 					schedulePod: &schedulePod{
-						podName: "preemptor-mid-priority",
+						podName:             "preemptor-mid-priority",
+						expectUnschedulable: true,
 					},
 				},
 				{
@@ -810,13 +820,13 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name: "create victim Pod that is going to be blocked in binding",
 					createPod: &createPod{
-						pod: st.MakePod().Name(PodBlockedInBindingName).Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Container("image").ZeroTerminationGracePeriod().Priority(1).Obj(),
+						pod: st.MakePod().Name(podBlockedInBindingName).Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Container("image").ZeroTerminationGracePeriod().Priority(1).Obj(),
 					},
 				},
 				{
 					name: "schedule victim Pod",
 					schedulePod: &schedulePod{
-						podName: PodBlockedInBindingName,
+						podName: podBlockedInBindingName,
 					},
 				},
 				{
@@ -929,18 +939,16 @@ func TestAsyncPreemption(t *testing.T) {
 
 				// Register fake bind plugin that will block on binding for the specified pod name, until it receives a resume signal via the blockBindingChannel.
 				blockBindingChannel := make(chan struct{})
-				defer func() {
-					close(blockBindingChannel)
-				}()
+				defer close(blockBindingChannel)
 				blockingBindPluginName := "blockingBindPlugin"
 				err = registry.Register(blockingBindPluginName, func(ctx context.Context, o runtime.Object, fh fwk.Handle) (fwk.Plugin, error) {
 					db, err := defaultbinder.New(ctx, o, fh)
 					if err != nil {
 						t.Fatalf("Error creating a default binder plugin: %v", err)
 					}
-					var bindPlugin = BlockingBindPlugin{
+					var bindPlugin = blockingBindPlugin{
 						name:                blockingBindPluginName,
-						nameOfPodToBlock:    PodBlockedInBindingName,
+						nameOfPodToBlock:    podBlockedInBindingName,
 						realPlugin:          db.(fwk.BindPlugin),
 						blockBindingChannel: blockBindingChannel,
 					}
@@ -1064,8 +1072,7 @@ func TestAsyncPreemption(t *testing.T) {
 						if pod == nil {
 							t.Fatalf("Expected the pod  %s to be in unschedulable queue before activation phase", scenario.activatePod.podName)
 						}
-						m := make(map[string]*v1.Pod)
-						m[scenario.activatePod.podName] = pod
+						m := map[string]*v1.Pod{scenario.activatePod.podName: pod}
 						testCtx.Scheduler.SchedulingQueue.Activate(logger, m)
 					case scenario.completePreemption != "":
 						lock.Lock()
@@ -1095,14 +1102,18 @@ func TestAsyncPreemption(t *testing.T) {
 							t.Fatalf("Expected the pod %s to be running preemption", createdPods[*scenario.podRunningPreemption].Name)
 						}
 					case scenario.resumeBind:
-						lock.Lock()
 						blockBindingChannel <- struct{}{}
-						lock.Unlock()
 					case scenario.verifyPodInUnschedulable != "":
 						// Wait for some time to make sure that the pod remains in unschedulable and is not immediately re-activated.
 						time.Sleep(200 * time.Millisecond)
-						if !podInUnschedulablePodPool(t, testCtx.Scheduler.SchedulingQueue, scenario.verifyPodInUnschedulable) {
-							t.Fatalf("Expected the pod %s to be in the unschedulable queue after the scheduling attempt", scenario.verifyPodInUnschedulable)
+						if err := wait.PollUntilContextTimeout(testCtx.Ctx, time.Millisecond*50, time.Millisecond*200, false, func(ctx context.Context) (bool, error) {
+							if !podInUnschedulablePodPool(t, testCtx.Scheduler.SchedulingQueue, scenario.verifyPodInUnschedulable) {
+								return false, fmt.Errorf("Expected the pod %s to remain in the unschedulable queue after the scheduling attempt", scenario.verifyPodInUnschedulable)
+							}
+							// Continue polling to confirm that pod remains in unschedulable queue and does not get activated.
+							return false, nil
+						}); err != nil {
+							t.Fatal(err)
 						}
 					}
 				}
@@ -1142,20 +1153,20 @@ func unschedulablePod(t *testing.T, queue queue.SchedulingQueue, podName string)
 	return nil
 }
 
-// BlockingBindPlugin is a fake plugin that simulates a long binding operation.
+// blockingBindPlugin is a fake plugin that simulates a long binding operation.
 // Underneath it calls realPlugin.Bind(), after receiving a signal that binding can be unblocked.
-type BlockingBindPlugin struct {
+type blockingBindPlugin struct {
 	name                string
 	nameOfPodToBlock    string
 	realPlugin          fwk.BindPlugin
 	blockBindingChannel chan struct{}
 }
 
-func (bp *BlockingBindPlugin) Name() string {
+func (bp *blockingBindPlugin) Name() string {
 	return bp.name
 }
 
-func (bp *BlockingBindPlugin) Bind(ctx context.Context, state fwk.CycleState, p *v1.Pod, nodeName string) *fwk.Status {
+func (bp *blockingBindPlugin) Bind(ctx context.Context, state fwk.CycleState, p *v1.Pod, nodeName string) *fwk.Status {
 	if strings.Contains(p.Name, bp.nameOfPodToBlock) {
 		// block the bind goroutine to complete until the test case allows it to proceed.
 		select {
@@ -1166,4 +1177,4 @@ func (bp *BlockingBindPlugin) Bind(ctx context.Context, state fwk.CycleState, p 
 	return bp.realPlugin.Bind(ctx, state, p, nodeName)
 }
 
-var _ fwk.BindPlugin = &BlockingBindPlugin{}
+var _ fwk.BindPlugin = &blockingBindPlugin{}
