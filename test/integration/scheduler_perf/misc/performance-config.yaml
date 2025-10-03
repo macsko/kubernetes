@@ -226,6 +226,28 @@
 #      initPods: 20000
 #      measurePods: 5000
 
+- name: PreemptionBasicBug
+  workloadTemplate:
+  - opcode: createNodes
+    countParam: $initNodes
+  - opcode: createPods
+    countParam: $initPods
+    podTemplatePath: ../templates/pod-low-priority.yaml
+    skipWaitToCompletion: true
+  - opcode: createPods
+    countParam: $measurePods
+    podTemplatePath: ../templates/pod-high-priority.yaml
+    collectMetrics: true
+  workloads:
+  - name: 100Nodes
+    featureGates:
+      SchedulerAsyncAPICalls: true
+    labels: [performance, short]
+    params:
+      initNodes: 100
+      initPods: 400
+      measurePods: 100
+
 # Measure throughput of regular schedulable pods that are interleaved by high priority preemption pods scheduled at 5/s rate.
 # Implementation of asynchronous preemption feature https://github.com/kubernetes/kubernetes/issues/126858 is supposed to increase the throughput of the measured pods as all heavy operations (apiserver communication) will be performed asynchronously, without blocking the scheduler loop.
 # How is it achieved:

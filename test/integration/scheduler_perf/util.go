@@ -120,8 +120,8 @@ func mustSetupCluster(tCtx ktesting.TContext, config *config.KubeSchedulerConfig
 	// TODO: client connection configuration, such as QPS or Burst is configurable in theory, this could be derived from the `config`, need to
 	// support this when there is any testcase that depends on such configuration.
 	cfg := restclient.CopyConfig(server.ClientConfig)
-	cfg.QPS = 5000.0
-	cfg.Burst = 5000
+	cfg.QPS = 100.0
+	cfg.Burst = 100
 
 	// use default component config if config here is nil
 	if config == nil {
