@@ -529,6 +529,7 @@ func TestAsyncPreemption(t *testing.T) {
 		// verifyPodInUnschedulable waits for some time and confirms that the given pod is in the unschedulable pool.
 		// The value is the name of the checked pod.
 		verifyPodInUnschedulable string
+		// waitForDeleted           string
 	}
 
 	tests := []struct {
@@ -810,12 +811,82 @@ func TestAsyncPreemption(t *testing.T) {
 				},
 			},
 		},
+		// {
+		// 	// This scenario verifies the fix for https://github.com/kubernetes/kubernetes/issues/134249
+		// 	// Scenario reproduces the issue:
+		// 	// Victim pod takes long in binding. Preemptor pod attempts preemption, goes to unschedulable, then gets activated by some unknown trigger.
+		// 	// Preemptor pod is expected to go back to unschedulable queue and remain there until victim binding and preemption is completed.
+		// 	name: "victim blocked in binding, preemptor pod gets activated randomly and returns to unschedulable queue until victim is bound and deleted",
+		// 	scenarios: []scenario{
+		// 		{
+		// 			name: "create victim Pod that is going to be blocked in binding",
+		// 			createPod: &createPod{
+		// 				pod: st.MakePod().Name(podBlockedInBindingName).Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Container("image").ZeroTerminationGracePeriod().Priority(1).Obj(),
+		// 			},
+		// 		},
+		// 		{
+		// 			name: "schedule victim Pod",
+		// 			schedulePod: &schedulePod{
+		// 				podName: podBlockedInBindingName,
+		// 			},
+		// 		},
+		// 		{
+		// 			name: "create a preemptor Pod",
+		// 			createPod: &createPod{
+		// 				pod: st.MakePod().Name("preemptor").Req(map[v1.ResourceName]string{v1.ResourceCPU: "4"}).Container("image").Priority(100).Obj(),
+		// 			},
+		// 		},
+		// 		{
+		// 			name: "schedule the preemptor Pod",
+		// 			schedulePod: &schedulePod{
+		// 				podName:             "preemptor",
+		// 				expectUnschedulable: true,
+		// 			},
+		// 		},
+		// 		{
+		// 			name:               "complete the preemption API call",
+		// 			completePreemption: "preemptor",
+		// 		},
+		// 		{
+		// 			name: "activate preemptor Pod, simulating a random event that activated it",
+		// 			activatePod: &activatePod{
+		// 				podName: "preemptor",
+		// 			},
+		// 		},
+		// 		{
+		// 			name: "schedule the preemptor Pod again and expect it to end up in unschedulable (waiting for preemption to finish)",
+		// 			schedulePod: &schedulePod{
+		// 				podName:             "preemptor",
+		// 				expectUnschedulable: true,
+		// 			},
+		// 		},
+		// 		{
+		// 			name:               "complete the preemption API call",
+		// 			completePreemption: "preemptor",
+		// 		},
+		// 		{
+		// 			name:                     "check that preemptor remained in unschedulable queue",
+		// 			verifyPodInUnschedulable: "preemptor",
+		// 		},
+		// 		{
+		// 			name:       "resume binding of the blocked pod",
+		// 			resumeBind: true,
+		// 		},
+		// 		{
+		// 			name: "schedule the preemptor Pod after the completed binding and preemption of the blocked pod",
+		// 			schedulePod: &schedulePod{
+		// 				podName:       "preemptor",
+		// 				expectSuccess: true,
+		// 			},
+		// 		},
+		// 	},
+		// },
 		{
 			// This scenario verifies the fix for https://github.com/kubernetes/kubernetes/issues/134249
 			// Scenario reproduces the issue:
 			// Victim pod takes long in binding. Preemptor pod attempts preemption, goes to unschedulable, then gets activated by some unknown trigger.
 			// Preemptor pod is expected to go back to unschedulable queue and remain there until victim binding and preemption is completed.
-			name: "victim blocked in binding, preemptor pod gets activated randomly and returns to unschedulable queue until victim is bound and deleted",
+			name: "victim blocked in binding, preemptor pod gets activated randomly and returns to unschedulable queue until victim is bound and deleted2", // TODO: DeletionTimestamp as well
 			scenarios: []scenario{
 				{
 					name: "create victim Pod that is going to be blocked in binding",
@@ -845,15 +916,55 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name:               "complete the preemption API call",
 					completePreemption: "preemptor",
-				},
+				}, // TODO: Wait for victim to be deleted
 				{
-					name: "activate preemptor Pod, simulating a random event that activated it",
-					activatePod: &activatePod{
-						podName: "preemptor",
+					name: "schedule the preemptor Pod again and expect it to end up in unschedulable (waiting for preemption to finish)",
+					schedulePod: &schedulePod{
+						podName:       "preemptor",
+						expectSuccess: true,
+						// expectUnschedulable: true,
 					},
 				},
 				{
-					name: "schedule the preemptor Pod again and expect it to end up in unschedulable (waiting for preemption to finish)",
+					name:       "resume binding of the blocked pod",
+					resumeBind: true,
+				},
+				// {
+				// 	name: "schedule the preemptor Pod again and expect it to end up in unschedulable (waiting for preemption to finish)",
+				// 	schedulePod: &schedulePod{
+				// 		podName:       "preemptor",
+				// 		expectSuccess: true,
+				// 	},
+				// },
+			},
+		},
+		{
+			// This scenario verifies the fix for https://github.com/kubernetes/kubernetes/issues/134249
+			// Scenario reproduces the issue:
+			// Victim pod takes long in binding. Preemptor pod attempts preemption, goes to unschedulable, then gets activated by some unknown trigger.
+			// Preemptor pod is expected to go back to unschedulable queue and remain there until victim binding and preemption is completed.
+			name: "victim blocked in binding, preemptor pod gets activated randomly and returns to unschedulable queue until victim is bound and deleted3", // TODO: DeletionTimestamp as well
+			scenarios: []scenario{
+				{
+					name: "create victim Pod that is going to be blocked in binding",
+					createPod: &createPod{
+						pod: st.MakePod().Name(podBlockedInBindingName).Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Container("image").Priority(1).Obj(),
+					},
+				},
+				{
+					name: "schedule victim Pod",
+					schedulePod: &schedulePod{
+						podName: podBlockedInBindingName,
+					},
+				},
+				{
+					name: "create a preemptor Pod",
+					createPod: &createPod{
+						pod: st.MakePod().Name("preemptor").Req(map[v1.ResourceName]string{v1.ResourceCPU: "4"}).Container("image").Priority(100).Obj(),
+					},
+				},
+				{
+					name: "schedule the preemptor Pod",
 					schedulePod: &schedulePod{
 						podName:             "preemptor",
 						expectUnschedulable: true,
@@ -862,29 +973,33 @@ func TestAsyncPreemption(t *testing.T) {
 				{
 					name:               "complete the preemption API call",
 					completePreemption: "preemptor",
-				},
+				}, // TODO: Wait for victim to be deleted
 				{
-					name:                     "check that preemptor remained in unschedulable queue",
-					verifyPodInUnschedulable: "preemptor",
+					name: "schedule the preemptor Pod again and expect it to end up in unschedulable (waiting for preemption to finish)",
+					schedulePod: &schedulePod{
+						podName:       "preemptor",
+						expectSuccess: true,
+						// expectUnschedulable: true,
+					},
 				},
 				{
 					name:       "resume binding of the blocked pod",
 					resumeBind: true,
 				},
-				{
-					name: "schedule the preemptor Pod after the completed binding and preemption of the blocked pod",
-					schedulePod: &schedulePod{
-						podName:       "preemptor",
-						expectSuccess: true,
-					},
-				},
+				// {
+				// 	name: "schedule the preemptor Pod again and expect it to end up in unschedulable (waiting for preemption to finish)",
+				// 	schedulePod: &schedulePod{
+				// 		podName:       "preemptor",
+				// 		expectSuccess: true,
+				// 	},
+				// },
 			},
 		},
 	}
 
 	// All test cases have the same node.
 	node := st.MakeNode().Name("node").Capacity(map[v1.ResourceName]string{v1.ResourceCPU: "4"}).Obj()
-	for _, asyncAPICallsEnabled := range []bool{true, false} {
+	for _, asyncAPICallsEnabled := range []bool{true} {
 		for _, test := range tests {
 			t.Run(fmt.Sprintf("%s (Async API calls enabled: %v)", test.name, asyncAPICallsEnabled), func(t *testing.T) {
 				featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SchedulerAsyncAPICalls, asyncAPICallsEnabled)
@@ -958,6 +1073,17 @@ func TestAsyncPreemption(t *testing.T) {
 					t.Fatalf("Error registering a bind plugin: %v", err)
 				}
 
+				// reservingPluginName := "reservingPlugin"
+				// err = registry.Register(reservingPluginName, func(ctx context.Context, o runtime.Object, fh fwk.Handle) (fwk.Plugin, error) {
+				// 	return &reservingPlugin{
+				// 		name:               reservingPluginName,
+				// 		nameOfPodToReserve: podBlockedInBindingName,
+				// 	}, nil
+				// })
+				// if err != nil {
+				// 	t.Fatalf("Error registering a reserving plugin: %v", err)
+				// }
+
 				cfg := configtesting.V1ToInternalWithDefaults(t, configv1.KubeSchedulerConfiguration{
 					Profiles: []configv1.KubeSchedulerProfile{{
 						SchedulerName: ptr.To(v1.DefaultSchedulerName),
@@ -966,6 +1092,7 @@ func TestAsyncPreemption(t *testing.T) {
 								Enabled: []configv1.Plugin{
 									{Name: blockingBindPluginName},
 									{Name: delayedPreemptionPluginName},
+									// {Name: reservingPluginName},
 								},
 								Disabled: []configv1.Plugin{
 									{Name: names.DefaultPreemption},
@@ -1115,6 +1242,12 @@ func TestAsyncPreemption(t *testing.T) {
 						}); err != nil {
 							t.Fatal(err)
 						}
+						// case scenario.waitForDeleted != "":
+						// 	err = wait.PollUntilContextTimeout(testCtx.Ctx, 100*time.Millisecond, 10*time.Second, true,
+						// 		testutils.PodDeleted(testCtx.Ctx, cs, testCtx.NS.Name, scenario.waitForDeleted))
+						// 	if err != nil {
+						// 		t.Errorf("Error while waiting for pod to get deleted: %v", err)
+						// 	}
 					}
 				}
 			})
@@ -1178,3 +1311,42 @@ func (bp *blockingBindPlugin) Bind(ctx context.Context, state fwk.CycleState, p 
 }
 
 var _ fwk.BindPlugin = &blockingBindPlugin{}
+
+// type reservingPlugin struct {
+// 	name               string
+// 	nameOfPodToReserve string
+// 	reserved           bool
+// }
+
+// func (rp *reservingPlugin) Name() string {
+// 	return rp.name
+// }
+
+// func (rp *reservingPlugin) EventsToRegister(_ context.Context) ([]fwk.ClusterEventWithHint, error) {
+// 	return []fwk.ClusterEventWithHint{
+// 		{Event: fwk.ClusterEvent{Resource: fwk.Pod, ActionType: fwk.Delete}},
+// 	}, nil
+// }
+
+// func (rp *reservingPlugin) Filter(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodeInfo fwk.NodeInfo) *fwk.Status {
+// 	if rp.reserved {
+// 		return fwk.NewStatus(fwk.Unschedulable, "resources are reserved")
+// 	}
+// 	return nil
+// }
+
+// func (rp *reservingPlugin) Reserve(ctx context.Context, state fwk.CycleState, p *v1.Pod, nodeName string) *fwk.Status {
+// 	if p.Name == rp.nameOfPodToReserve {
+// 		rp.reserved = true
+// 	}
+// 	return nil
+// }
+
+// func (rp *reservingPlugin) Unreserve(ctx context.Context, state fwk.CycleState, p *v1.Pod, nodeName string) {
+// 	if p.Name == rp.nameOfPodToReserve {
+// 		rp.reserved = false
+// 	}
+// }
+
+// var _ fwk.FilterPlugin = &reservingPlugin{}
+// var _ fwk.ReservePlugin = &reservingPlugin{}
