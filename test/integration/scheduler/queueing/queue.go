@@ -643,7 +643,7 @@ var CoreResourceEnqueueTestCases = []*CoreResourceEnqueueTestCase{
 			// here we check the unschedulable plugins by directly using the SchedulingQueue function for now.
 			// We can change here to assess unschedPlugin by triggering cluster events like other test cases
 			// after QHint is graduated and preCheck is removed.
-			pInfo, ok := testCtx.Scheduler.SchedulingQueue.GetPod("pod1", testCtx.NS.Name)
+			pInfo, ok := testCtx.Scheduler.SchedulingQueue.GetPod("pod1", testCtx.NS.Name, nil) // TODO:
 			if !ok || pInfo == nil {
 				return nil, fmt.Errorf("pod1 is not found in the scheduling queue")
 			}

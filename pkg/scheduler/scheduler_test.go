@@ -340,11 +340,11 @@ func TestFailureHandler(t *testing.T) {
 
 				var got *v1.Pod
 				if tt.podUpdatedDuringScheduling {
-					pInfo, ok := queue.GetPod(testPod.Name, testPod.Namespace)
+					pInfo, ok := queue.GetPod(testPod.Name, testPod.Namespace, testPod.Spec.WorkloadRef)
 					if !ok {
 						t.Fatalf("Failed to get pod %s/%s from queue", testPod.Namespace, testPod.Name)
 					}
-					got = pInfo.Pod
+					got = pInfo.GetPod()
 				} else {
 					got = getPodFromPriorityQueue(queue, testPod)
 				}

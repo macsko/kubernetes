@@ -23,7 +23,6 @@ import (
 	v1 "k8s.io/api/core/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/klog/v2"
-	fwk "k8s.io/kube-scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/backend/heap"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/metrics"
@@ -40,12 +39,12 @@ const backoffQOrderingWindowDuration = time.Second
 // backoffQueuer is a wrapper for backoffQ related operations.
 // Its methods that relies on the queues, take the lock inside.
 type backoffQueuer interface {
-	// isPodBackingoff returns true if a pod is still waiting for its backoff timer.
-	// If this returns true, the pod should not be re-tried.
-	// If the pod backoff time is in the actual ordering window, it should still be backing off.
-	isPodBackingoff(podInfo *framework.QueuedPodInfo) bool
-	// popAllBackoffCompleted pops all pods from podBackoffQ and podErrorBackoffQ that completed backoff.
-	popAllBackoffCompleted(logger klog.Logger) []*framework.QueuedPodInfo
+	// isEntityBackingoff returns true if an entity is still waiting for its backoff timer.
+	// If this returns true, the entity should not be re-tried.
+	// If the entity backoff time is in the actual ordering window, it should still be backing off.
+	isEntityBackingoff(entity framework.QueuedEntityInfo) bool
+	// popAllBackoffCompleted pops all entities from podBackoffQ and podErrorBackoffQ that completed backoff.
+	popAllBackoffCompleted(logger klog.Logger) []framework.QueuedEntityInfo
 
 	// podInitialBackoffDuration returns initial backoff duration that pod can get.
 	podInitialBackoffDuration() time.Duration
@@ -57,20 +56,20 @@ type backoffQueuer interface {
 	// and whole windows have to be flushed at one time without a visible latency.
 	waitUntilAlignedWithOrderingWindow(f func(), stopCh <-chan struct{})
 
-	// add adds the pInfo to backoffQueue.
+	// add adds the entity to backoffQueue.
 	// The event should show which event triggered this addition and is used for the metric recording.
-	// It also ensures that pInfo is not in both queues.
-	add(logger klog.Logger, pInfo *framework.QueuedPodInfo, event string)
-	// update updates the pod in backoffQueue if oldPodInfo is already in the queue.
+	// It also ensures that entity is not in both queues.
+	add(logger klog.Logger, entity framework.QueuedEntityInfo, event string)
+	// update updates the pod in backoffQueue if oldPodInfo is already in the queue. // TODO: Update the comments
 	// It returns new pod info if updated, nil otherwise.
-	update(newPod *v1.Pod, oldPodInfo *framework.QueuedPodInfo) *framework.QueuedPodInfo
-	// delete deletes the pInfo from backoffQueue.
-	// It returns true if the pod was deleted.
-	delete(pInfo *framework.QueuedPodInfo) bool
-	// get returns the pInfo matching given pInfoLookup, if exists.
-	get(pInfoLookup *framework.QueuedPodInfo) (*framework.QueuedPodInfo, bool)
-	// has inform if pInfo exists in the queue.
-	has(pInfo *framework.QueuedPodInfo) bool
+	update(newPod *v1.Pod, oldEntity framework.QueuedEntityInfo) *framework.QueuedPodInfo
+	// delete deletes the entity from backoffQueue.
+	// It returns true if the entity was deleted.
+	delete(entity framework.QueuedEntityInfo) bool
+	// get returns the entity matching given entityLookup, if exists.
+	get(entityLookup framework.QueuedEntityInfo) (framework.QueuedEntityInfo, bool)
+	// has inform if entity exists in the queue.
+	has(entity framework.QueuedEntityInfo) bool
 	// list returns all pods that are in the queue.
 	list() []*v1.Pod
 	// len returns length of the queue.
@@ -92,26 +91,30 @@ type backoffQueue struct {
 
 	// podBackoffQ is a heap ordered by backoff expiry. Pods which have completed backoff
 	// are popped from this heap before the scheduler looks at activeQ
-	podBackoffQ *heap.Heap[*framework.QueuedPodInfo]
+	podBackoffQ *heap.Heap[framework.QueuedEntityInfo] // TODO: entityBackoffQ?
 	// podErrorBackoffQ is a heap ordered by error backoff expiry. Pods which have completed backoff
 	// are popped from this heap before the scheduler looks at activeQ
-	podErrorBackoffQ *heap.Heap[*framework.QueuedPodInfo]
+	podErrorBackoffQ *heap.Heap[framework.QueuedEntityInfo]
 
-	podInitialBackoff time.Duration
-	podMaxBackoff     time.Duration
+	podInitialBackoff      time.Duration
+	podMaxBackoff          time.Duration
+	podGroupInitialBackoff time.Duration // TODO:
+	podGroupMaxBackoff     time.Duration
 	// activeQLessFn is used as an eventual less function if two backoff times are equal,
 	// when the SchedulerPopFromBackoffQ feature is enabled.
-	activeQLessFn fwk.LessFunc
+	activeQLessFn func(entity1, entity2 framework.QueuedEntityInfo) bool
 
 	// isPopFromBackoffQEnabled indicates whether the feature gate SchedulerPopFromBackoffQ is enabled.
 	isPopFromBackoffQEnabled bool
 }
 
-func newBackoffQueue(clock clock.WithTicker, podInitialBackoffDuration time.Duration, podMaxBackoffDuration time.Duration, activeQLessFn fwk.LessFunc, popFromBackoffQEnabled bool) *backoffQueue {
+func newBackoffQueue(clock clock.WithTicker, podInitialBackoffDuration time.Duration, podMaxBackoffDuration time.Duration, activeQLessFn func(entity1, entity2 framework.QueuedEntityInfo) bool, popFromBackoffQEnabled bool) *backoffQueue {
 	bq := &backoffQueue{
 		clock:                    clock,
 		podInitialBackoff:        podInitialBackoffDuration,
 		podMaxBackoff:            podMaxBackoffDuration,
+		podGroupInitialBackoff:   podInitialBackoffDuration,
+		podGroupMaxBackoff:       podMaxBackoffDuration,
 		isPopFromBackoffQEnabled: popFromBackoffQEnabled,
 		activeQLessFn:            activeQLessFn,
 	}
@@ -119,8 +122,8 @@ func newBackoffQueue(clock clock.WithTicker, podInitialBackoffDuration time.Dura
 	if popFromBackoffQEnabled {
 		podBackoffQLessFn = bq.lessBackoffCompletedWithPriority
 	}
-	bq.podBackoffQ = heap.NewWithRecorder(podInfoKeyFunc, podBackoffQLessFn, metrics.NewBackoffPodsRecorder())
-	bq.podErrorBackoffQ = heap.NewWithRecorder(podInfoKeyFunc, bq.lessBackoffCompleted, metrics.NewBackoffPodsRecorder())
+	bq.podBackoffQ = heap.NewWithRecorder(queuedEntityKeyFunc, podBackoffQLessFn, metrics.NewBackoffPodsRecorder())
+	bq.podErrorBackoffQ = heap.NewWithRecorder(queuedEntityKeyFunc, bq.lessBackoffCompleted, metrics.NewBackoffPodsRecorder())
 
 	return bq
 }
@@ -187,66 +190,62 @@ func (bq *backoffQueue) waitUntilAlignedWithOrderingWindow(f func(), stopCh <-ch
 }
 
 // lessBackoffCompletedWithPriority is a less function of podBackoffQ if PopFromBackoffQ feature is enabled.
-// It orders the pods in the same BackoffOrderingWindow the same as the activeQ will do to improve popping order from backoffQ when activeQ is empty.
-func (bq *backoffQueue) lessBackoffCompletedWithPriority(pInfo1, pInfo2 *framework.QueuedPodInfo) bool {
-	bo1 := bq.getBackoffTime(pInfo1)
-	bo2 := bq.getBackoffTime(pInfo2)
+// It orders the entities in the same BackoffOrderingWindow the same as the activeQ will do to improve popping order from backoffQ when activeQ is empty.
+func (bq *backoffQueue) lessBackoffCompletedWithPriority(entity1, entity2 framework.QueuedEntityInfo) bool {
+	bo1 := bq.getBackoffTime(entity1)
+	bo2 := bq.getBackoffTime(entity2)
 	if !bo1.Equal(bo2) {
 		return bo1.Before(bo2)
 	}
-	// If the backoff time is the same, sort the pod in the same manner as activeQ does.
-	return bq.activeQLessFn(pInfo1, pInfo2)
+	// If the backoff time is the same, sort the entity in the same manner as activeQ does.
+	return bq.activeQLessFn(entity1, entity2)
 }
 
 // lessBackoffCompleted is a less function of podErrorBackoffQ.
-func (bq *backoffQueue) lessBackoffCompleted(pInfo1, pInfo2 *framework.QueuedPodInfo) bool {
-	bo1 := bq.getBackoffTime(pInfo1)
-	bo2 := bq.getBackoffTime(pInfo2)
+func (bq *backoffQueue) lessBackoffCompleted(entity1, entity2 framework.QueuedEntityInfo) bool {
+	bo1 := bq.getBackoffTime(entity1)
+	bo2 := bq.getBackoffTime(entity2)
 	return bo1.Before(bo2)
 }
 
-// isPodBackingoff returns true if a pod is still waiting for its backoff timer.
-// If this returns true, the pod should not be re-tried.
-// If the pod backoff time is in the actual ordering window, it should still be backing off.
-func (bq *backoffQueue) isPodBackingoff(podInfo *framework.QueuedPodInfo) bool {
-	boTime := bq.getBackoffTime(podInfo)
+// isEntityBackingoff returns true if an entity is still waiting for its backoff timer.
+// If this returns true, the entity should not be re-tried.
+// If the entity backoff time is in the actual ordering window, it should still be backing off.
+func (bq *backoffQueue) isEntityBackingoff(entity framework.QueuedEntityInfo) bool {
+	boTime := bq.getBackoffTime(entity)
 	// Don't use After, because in case of windows equality we want to return true.
 	return !boTime.Before(bq.alignToWindow(bq.clock.Now()))
 }
 
-// getBackoffTime returns the time that podInfo completes backoff.
-// It caches the result in podInfo.BackoffExpiration and returns this value in subsequent calls.
-// The cache will be cleared when this pod is poped from the scheduling queue again (i.e., at activeQ's pop),
-// because of the fact that the backoff time is calculated based on podInfo.Attempts,
-// which doesn't get changed until the pod's scheduling is retried.
-func (bq *backoffQueue) getBackoffTime(podInfo *framework.QueuedPodInfo) time.Time {
+// getBackoffTime returns the time that entity completes backoff.
+func (bq *backoffQueue) getBackoffTime(entity framework.QueuedEntityInfo) time.Time {
 	if bq.podMaxBackoff == 0 {
 		// If podMaxBackoff is set to 0, the backoff should be disabled completely.
 		return time.Time{}
 	}
-	count := podInfo.UnschedulableCount
-	if podInfo.ConsecutiveErrorsCount > 0 {
-		// This Pod has experienced an error status at the last scheduling cycle,
+	count := entity.GetUnschedulableCount()
+	if entity.GetConsecutiveErrorsCount() > 0 {
+		// This entity has experienced an error status at the last scheduling cycle,
 		// and we should consider the error count for the backoff duration.
-		count = podInfo.ConsecutiveErrorsCount
+		count = entity.GetConsecutiveErrorsCount()
 	}
 
 	if count == 0 {
-		// When the Pod hasn't experienced any scheduling attempts,
+		// When the entity hasn't experienced any scheduling attempts,
 		// they don't have to get a backoff.
 		return time.Time{}
 	}
 
-	if podInfo.BackoffExpiration.IsZero() {
+	if entity.GetBackoffExpiration().IsZero() {
 		duration := bq.calculateBackoffDuration(count)
-		podInfo.BackoffExpiration = bq.alignToWindow(podInfo.Timestamp.Add(duration))
+		entity.SetBackoffExpiration(bq.alignToWindow(entity.GetTimestamp().Add(duration)))
 	}
 
-	return podInfo.BackoffExpiration
+	return entity.GetBackoffExpiration()
 }
 
 // calculateBackoffDuration is a helper function for calculating the backoffDuration
-// based on the number of attempts the pod has made.
+// based on the number of attempts the item has made.
 func (bq *backoffQueue) calculateBackoffDuration(count int) time.Duration {
 	if count == 0 {
 		return 0
@@ -259,29 +258,28 @@ func (bq *backoffQueue) calculateBackoffDuration(count int) time.Duration {
 	return time.Duration(bq.podInitialBackoff << shift)
 }
 
-func (bq *backoffQueue) popAllBackoffCompletedWithQueue(logger klog.Logger, queue *heap.Heap[*framework.QueuedPodInfo]) []*framework.QueuedPodInfo {
-	var poppedPods []*framework.QueuedPodInfo
+func (bq *backoffQueue) popAllBackoffCompletedWithQueue(logger klog.Logger, queue *heap.Heap[framework.QueuedEntityInfo]) []framework.QueuedEntityInfo {
+	var poppedEntities []framework.QueuedEntityInfo
 	for {
-		pInfo, ok := queue.Peek()
-		if !ok || pInfo == nil {
+		entity, ok := queue.Peek()
+		if !ok || entity == nil {
 			break
 		}
-		pod := pInfo.Pod
-		if bq.isPodBackingoff(pInfo) {
+		if bq.isEntityBackingoff(entity) {
 			break
 		}
 		_, err := queue.Pop()
 		if err != nil {
-			utilruntime.HandleErrorWithLogger(logger, err, "Unable to pop pod from backoff queue despite backoff completion", "pod", klog.KObj(pod))
+			utilruntime.HandleErrorWithLogger(logger, err, "Unable to pop entity from backoff queue despite backoff completion", "type", entity.Type(), "entity", klog.KObj(entity))
 			break
 		}
-		poppedPods = append(poppedPods, pInfo)
+		poppedEntities = append(poppedEntities, entity)
 	}
-	return poppedPods
+	return poppedEntities
 }
 
-// popAllBackoffCompleted pops all pods from podBackoffQ and podErrorBackoffQ that completed backoff.
-func (bq *backoffQueue) popAllBackoffCompleted(logger klog.Logger) []*framework.QueuedPodInfo {
+// popAllBackoffCompleted pops all entities from podBackoffQ and podErrorBackoffQ that completed backoff.
+func (bq *backoffQueue) popAllBackoffCompleted(logger klog.Logger) []framework.QueuedEntityInfo {
 	bq.lock.Lock()
 	defer bq.lock.Unlock()
 
@@ -289,99 +287,105 @@ func (bq *backoffQueue) popAllBackoffCompleted(logger klog.Logger) []*framework.
 	return append(bq.popAllBackoffCompletedWithQueue(logger, bq.podBackoffQ), bq.popAllBackoffCompletedWithQueue(logger, bq.podErrorBackoffQ)...)
 }
 
-// add adds the pInfo to backoffQueue.
+// add adds the entity to backoffQueue.
 // The event should show which event triggered this addition and is used for the metric recording.
-// It also ensures that pInfo is not in both queues.
-func (bq *backoffQueue) add(logger klog.Logger, pInfo *framework.QueuedPodInfo, event string) {
+// It also ensures that entity is not in both queues.
+func (bq *backoffQueue) add(logger klog.Logger, entity framework.QueuedEntityInfo, event string) {
 	bq.lock.Lock()
 	defer bq.lock.Unlock()
 
-	// If pod has empty both unschedulable plugins and pending plugins,
+	// If entity has empty both unschedulable plugins and pending plugins,
 	// it means that it failed because of error and should be moved to podErrorBackoffQ.
-	if pInfo.UnschedulablePlugins.Len() == 0 && pInfo.PendingPlugins.Len() == 0 {
-		bq.podErrorBackoffQ.AddOrUpdate(pInfo)
-		// Ensure the pod is not in the podBackoffQ and report the error if it happens.
-		err := bq.podBackoffQ.Delete(pInfo)
+	if entity.GetUnschedulablePlugins().Len() == 0 && entity.GetPendingPlugins().Len() == 0 {
+		bq.podErrorBackoffQ.AddOrUpdate(entity)
+		// Ensure the entity is not in the podBackoffQ and report the error if it happens.
+		err := bq.podBackoffQ.Delete(entity)
 		if err == nil {
-			logger.Error(nil, "BackoffQueue add() was called with a pod that was already in the podBackoffQ", "pod", klog.KObj(pInfo.Pod))
+			logger.Error(nil, "BackoffQueue add() was called with an entity that was already in the podBackoffQ", "type", entity.Type(), "entity", klog.KObj(entity))
 			return
 		}
 		metrics.SchedulerQueueIncomingPods.WithLabelValues("backoff", event).Inc()
-		logger.V(5).Info("Pod moved to an internal scheduling queue", "pod", klog.KObj(pInfo.Pod), "event", event, "queue", backoffQ)
+		logger.V(5).Info("Entity moved to an internal scheduling queue", "type", entity.Type(), "entity", klog.KObj(entity), "event", event, "queue", backoffQ)
 		return
 	}
-	bq.podBackoffQ.AddOrUpdate(pInfo)
-	// Ensure the pod is not in the podErrorBackoffQ and report the error if it happens.
-	err := bq.podErrorBackoffQ.Delete(pInfo)
+	bq.podBackoffQ.AddOrUpdate(entity)
+	// Ensure the entity is not in the podErrorBackoffQ and report the error if it happens.
+	err := bq.podErrorBackoffQ.Delete(entity)
 	if err == nil {
-		logger.Error(nil, "BackoffQueue add() was called with a pod that was already in the podErrorBackoffQ", "pod", klog.KObj(pInfo.Pod))
+		logger.Error(nil, "BackoffQueue add() was called with an entity that was already in the podErrorBackoffQ", "type", entity.Type(), "entity", klog.KObj(entity))
 		return
 	}
 	metrics.SchedulerQueueIncomingPods.WithLabelValues("backoff", event).Inc()
-	logger.V(5).Info("Pod moved to an internal scheduling queue", "pod", klog.KObj(pInfo.Pod), "event", event, "queue", backoffQ)
+	logger.V(5).Info("Entity moved to an internal scheduling queue", "type", entity.Type(), "entity", klog.KObj(entity), "event", event, "queue", backoffQ)
 }
 
 // update updates the pod in backoffQueue if oldPodInfo is already in the queue.
 // It returns new pod info if updated, nil otherwise.
-func (bq *backoffQueue) update(newPod *v1.Pod, oldPodInfo *framework.QueuedPodInfo) *framework.QueuedPodInfo {
+func (bq *backoffQueue) update(newPod *v1.Pod, oldPodInfo framework.QueuedEntityInfo) *framework.QueuedPodInfo {
 	bq.lock.Lock()
 	defer bq.lock.Unlock()
 
 	// If the pod is in the backoff queue, update it there.
-	if pInfo, exists := bq.podBackoffQ.Get(oldPodInfo); exists {
-		_ = pInfo.Update(newPod)
-		bq.podBackoffQ.AddOrUpdate(pInfo)
-		return pInfo
+	if entity, exists := bq.podBackoffQ.Get(oldPodInfo); exists {
+		podInfo, err := entity.Update(newPod)
+		if err != nil {
+
+		}
+		bq.podBackoffQ.AddOrUpdate(entity)
+		return podInfo
 	}
 	// If the pod is in the error backoff queue, update it there.
-	if pInfo, exists := bq.podErrorBackoffQ.Get(oldPodInfo); exists {
-		_ = pInfo.Update(newPod)
-		bq.podErrorBackoffQ.AddOrUpdate(pInfo)
-		return pInfo
+	if entity, exists := bq.podErrorBackoffQ.Get(oldPodInfo); exists {
+		podInfo, err := entity.Update(newPod)
+		if err != nil {
+
+		}
+		bq.podErrorBackoffQ.AddOrUpdate(entity)
+		return podInfo
 	}
 	return nil
 }
 
-// delete deletes the pInfo from backoffQueue.
-// It returns true if the pod was deleted.
-func (bq *backoffQueue) delete(pInfo *framework.QueuedPodInfo) bool {
+// delete deletes the entity from backoffQueue.
+// It returns true if the entity was deleted.
+func (bq *backoffQueue) delete(entity framework.QueuedEntityInfo) bool {
 	bq.lock.Lock()
 	defer bq.lock.Unlock()
 
-	if bq.podBackoffQ.Delete(pInfo) == nil {
+	if bq.podBackoffQ.Delete(entity) == nil {
 		return true
 	}
-	return bq.podErrorBackoffQ.Delete(pInfo) == nil
+	return bq.podErrorBackoffQ.Delete(entity) == nil
 }
 
-// popBackoff pops the pInfo from the podBackoffQ.
+// popBackoff pops the entity from the podBackoffQ.
 // It returns error if the queue is empty.
-// This doesn't pop the pods from the podErrorBackoffQ.
-func (bq *backoffQueue) popBackoff() (*framework.QueuedPodInfo, error) {
+// This doesn't pop the entities from the podErrorBackoffQ.
+func (bq *backoffQueue) popBackoff() (framework.QueuedEntityInfo, error) {
 	bq.lock.Lock()
 	defer bq.lock.Unlock()
 
 	return bq.podBackoffQ.Pop()
 }
 
-// get returns the pInfo matching given pInfoLookup, if exists.
-func (bq *backoffQueue) get(pInfoLookup *framework.QueuedPodInfo) (*framework.QueuedPodInfo, bool) {
+// get returns the entity matching given entityLookup, if exists.
+func (bq *backoffQueue) get(entityLookup framework.QueuedEntityInfo) (framework.QueuedEntityInfo, bool) {
 	bq.lock.RLock()
 	defer bq.lock.RUnlock()
 
-	pInfo, exists := bq.podBackoffQ.Get(pInfoLookup)
+	entity, exists := bq.podBackoffQ.Get(entityLookup)
 	if exists {
-		return pInfo, true
+		return entity, true
 	}
-	return bq.podErrorBackoffQ.Get(pInfoLookup)
+	return bq.podErrorBackoffQ.Get(entityLookup)
 }
 
-// has inform if pInfo exists in the queue.
-func (bq *backoffQueue) has(pInfo *framework.QueuedPodInfo) bool {
+// has inform if entity exists in the queue.
+func (bq *backoffQueue) has(entity framework.QueuedEntityInfo) bool {
 	bq.lock.RLock()
 	defer bq.lock.RUnlock()
 
-	return bq.podBackoffQ.Has(pInfo) || bq.podErrorBackoffQ.Has(pInfo)
+	return bq.podBackoffQ.Has(entity) || bq.podErrorBackoffQ.Has(entity)
 }
 
 // list returns all pods that are in the queue.
@@ -390,11 +394,17 @@ func (bq *backoffQueue) list() []*v1.Pod {
 	defer bq.lock.RUnlock()
 
 	var result []*v1.Pod
-	for _, pInfo := range bq.podBackoffQ.List() {
-		result = append(result, pInfo.Pod)
+	for _, entity := range bq.podBackoffQ.List() {
+		entity.ForEachPod(func(pInfo *framework.QueuedPodInfo) bool {
+			result = append(result, pInfo.Pod)
+			return true
+		})
 	}
-	for _, pInfo := range bq.podErrorBackoffQ.List() {
-		result = append(result, pInfo.Pod)
+	for _, entity := range bq.podErrorBackoffQ.List() {
+		entity.ForEachPod(func(pInfo *framework.QueuedPodInfo) bool {
+			result = append(result, pInfo.Pod)
+			return true
+		})
 	}
 	return result
 }

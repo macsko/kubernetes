@@ -171,16 +171,18 @@ func nominatedNodeName(pod *v1.Pod) string {
 }
 
 type podRef struct {
-	name      string
-	namespace string
-	uid       types.UID
+	name        string
+	namespace   string
+	uid         types.UID
+	workloadRef *v1.WorkloadReference
 }
 
 func podToRef(pod *v1.Pod) podRef {
 	return podRef{
-		name:      pod.Name,
-		namespace: pod.Namespace,
-		uid:       pod.UID,
+		name:        pod.Name,
+		namespace:   pod.Namespace,
+		uid:         pod.UID,
+		workloadRef: pod.Spec.WorkloadRef,
 	}
 }
 
@@ -190,6 +192,9 @@ func (np podRef) toPod() *v1.Pod {
 			Name:      np.name,
 			Namespace: np.namespace,
 			UID:       np.uid,
+		},
+		Spec: v1.PodSpec{
+			WorkloadRef: np.workloadRef,
 		},
 	}
 }
