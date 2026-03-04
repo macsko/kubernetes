@@ -353,8 +353,10 @@ func newQueuedPodInfoForLookup(pod *v1.Pod, plugins ...string) *framework.Queued
 	// Since this is only used for a lookup in the queue, we only need to set the Pod,
 	// and so we avoid creating a full PodInfo, which is expensive to instantiate frequently.
 	return &framework.QueuedPodInfo{
-		PodInfo:              &framework.PodInfo{Pod: pod},
-		UnschedulablePlugins: sets.New(plugins...),
+		PodInfo: &framework.PodInfo{Pod: pod},
+		QueueingParams: &framework.QueueingParams{
+			UnschedulablePlugins: sets.New(plugins...),
+		},
 	}
 }
 
@@ -642,11 +644,12 @@ func (p *PriorityQueue) runPreEnqueuePlugins(ctx context.Context, entity framewo
 		}
 		return true
 	})
+	queueingParams := entity.GetQueueingParams()
 	if gatedPodInfo != nil {
-		entity.SetGatingPlugin(gatedPodInfo.GatingPlugin, gatedPodInfo.GatingPluginEvents)
-		entity.SetUnschedulablePlugins(entity.GetUnschedulablePlugins().Union(gatedPodInfo.UnschedulablePlugins)) // TODO: Update metric?
+		queueingParams.GatingPlugin = gatedPodInfo.QueueingParams.GatingPlugin
+		queueingParams.GatingPluginEvents = gatedPodInfo.QueueingParams.GatingPluginEvents
 	} else {
-		entity.SetGatingPlugin("", nil)
+		queueingParams.GatingPlugin = "" // TODO:
 	}
 }
 
@@ -751,9 +754,9 @@ func (p *PriorityQueue) moveToActiveQ(logger klog.Logger, entity framework.Queue
 			p.unschedulableEntities.addOrUpdate(entity, gatedBefore, event)
 			return
 		}
-		if entity.GetInitialAttemptTimestamp() == nil {
+		if entity.GetQueueingParams().InitialAttemptTimestamp == nil {
 			now := p.clock.Now()
-			entity.SetInitialAttemptTimestamp(&now)
+			entity.GetQueueingParams().InitialAttemptTimestamp = &now
 		}
 		p.unschedulableEntities.delete(entity, gatedBefore)
 		p.backoffQ.delete(entity)
@@ -973,7 +976,7 @@ func (p *PriorityQueue) determineSchedulingHintForInFlightPod(logger klog.Logger
 // addUnschedulableWithoutQueueingHint inserts an entity that cannot be scheduled into
 // the queue, unless it is already in the queue.
 func (p *PriorityQueue) addUnschedulableWithoutQueueingHint(logger klog.Logger, entity framework.QueuedEntityInfo, podSchedulingCycle int64) error {
-	rejectorPlugins := entity.GetUnschedulablePlugins().Union(entity.GetPendingPlugins())
+	rejectorPlugins := entity.GetQueueingParams().UnschedulablePlugins.Union(entity.GetQueueingParams().PendingPlugins)
 
 	for plugin := range rejectorPlugins {
 		metrics.UnschedulableReason(plugin, entity.GetSchedulerName()).Inc()
@@ -1043,9 +1046,6 @@ func (p *PriorityQueue) AddUnschedulablePodIfNotPresent(logger klog.Logger, pInf
 	}
 
 	if p.isPodGroupMember(pod) {
-		// TODO: Verify if the pod group is enqueued, if yes, add it there (use addPodGroupMember?, no because needs to add to unschedulable, not active).
-		// Pod belongs to a pod group so should stay pending until the whole pod group returns to the queue.
-
 		if added := p.addToPodGroupIfExists(pInfo); added {
 		} else {
 			pgInfoLookup := newQueuedPodGroupInfoForLookup(pInfo.Pod)
@@ -1112,7 +1112,7 @@ func (p *PriorityQueue) AddAttemptedPodGroupIfNotPresent(logger klog.Logger, pgI
 	if len(pendingPods) == 0 {
 		return nil
 	}
-	pgInfo.SetPods(pendingPods) // TODO: UnscheduledPods, sort
+	pgInfo.SetPods(pendingPods)
 	p.pendingPodGroupPods.clear(pgInfo)
 	// TODO: Based on pending pods?
 	if len(pgInfo.UnschedulablePlugins) == 0 && len(pgInfo.PendingPlugins) == 0 {
@@ -1184,9 +1184,9 @@ func (p *PriorityQueue) flushUnschedulablePodsLeftover(logger klog.Logger) {
 	var entitiesToMove []framework.QueuedEntityInfo
 	currentTime := p.clock.Now()
 	for _, entity := range p.unschedulableEntities.entityInfoMap {
-		lastScheduleTime := entity.GetTimestamp()
+		lastScheduleTime := entity.GetQueueingParams().Timestamp
 		if currentTime.Sub(lastScheduleTime) > p.podMaxInUnschedulablePodsDuration {
-			entity.SetWasFlushedFromUnschedulable(true)
+			entity.GetQueueingParams().WasFlushedFromUnschedulable = true
 			entitiesToMove = append(entitiesToMove, entity)
 		}
 	}
@@ -1386,7 +1386,7 @@ func (p *PriorityQueue) Delete(pod *v1.Pod) {
 					p.backoffQ.delete(pgInfo)
 					p.unschedulableEntities.delete(pgInfo, pgInfo.Gated())
 					// Drop metric for deleted pod group.
-					for plugin := range pgInfo.GetUnschedulablePlugins().Union(pgInfo.GetPendingPlugins()) {
+					for plugin := range pgInfo.GetQueueingParams().UnschedulablePlugins.Union(pgInfo.GetQueueingParams().PendingPlugins) {
 						metrics.UnschedulableReason(plugin, pgInfo.SchedulerName).Dec() // TODO: Per pod?
 					}
 				}
@@ -1405,7 +1405,7 @@ func (p *PriorityQueue) Delete(pod *v1.Pod) {
 		if pqi := p.unschedulableEntities.get(pInfo); pqi != nil {
 			p.unschedulableEntities.delete(pInfo, pqi.Gated())
 			// Drop metric for deleted pod.
-			for plugin := range pqi.GetUnschedulablePlugins().Union(pqi.GetPendingPlugins()) {
+			for plugin := range pqi.GetQueueingParams().UnschedulablePlugins.Union(pqi.GetQueueingParams().PendingPlugins) { // TODO: Method for returning these plugins
 				metrics.UnschedulableReason(plugin, pod.Spec.SchedulerName).Dec()
 			}
 		}
@@ -1510,7 +1510,7 @@ func (p *PriorityQueue) moveEntitiesToActiveOrBackoffQueue(logger klog.Logger, e
 
 	activated := false
 	for _, entity := range entityInfoList {
-		if entity.Gated() && !framework.MatchAnyClusterEvent(event, entity.GetGatingPluginEvents()) {
+		if entity.Gated() && !framework.MatchAnyClusterEvent(event, entity.GetQueueingParams().GatingPluginEvents) {
 			// This event doesn't interest the gating plugin of this entity,
 			// which means this event never moves this entity to activeQ.
 			continue
@@ -1764,10 +1764,12 @@ func (p *PriorityQueue) newQueuedPodInfo(pod *v1.Pod, plugins ...string) *framew
 	// and we can't fix the validation for backwards compatibility.
 	podInfo, _ := framework.NewPodInfo(pod)
 	return &framework.QueuedPodInfo{
-		PodInfo:                 podInfo,
-		Timestamp:               now,
-		InitialAttemptTimestamp: nil,
-		UnschedulablePlugins:    sets.New(plugins...),
+		PodInfo: podInfo,
+		QueueingParams: &framework.QueueingParams{
+			Timestamp:               now,
+			InitialAttemptTimestamp: nil,
+			UnschedulablePlugins:    sets.New(plugins...),
+		},
 		NeedsPodGroupScheduling: p.isGenericWorkloadEnabled && pod.Spec.WorkloadRef != nil,
 	}
 }
@@ -1780,11 +1782,13 @@ func (p *PriorityQueue) newQueuedPodGroupInfo(podInfo *framework.QueuedPodInfo) 
 			WorkloadRef:     podInfo.Pod.Spec.WorkloadRef,
 			UnscheduledPods: []*v1.Pod{podInfo.Pod},
 		},
-		QueuedPodInfos:          []*framework.QueuedPodInfo{podInfo},
-		Timestamp:               podInfo.Timestamp,
-		InitialAttemptTimestamp: podInfo.InitialAttemptTimestamp,
-		SchedulerName:           podInfo.Pod.Spec.SchedulerName,
-		Priority:                podInfo.GetPriority(), // TODO: Can we use this direct call?
+		QueuedPodInfos: []*framework.QueuedPodInfo{podInfo},
+		QueueingParams: &framework.QueueingParams{
+			Timestamp:               podInfo.Timestamp,
+			InitialAttemptTimestamp: podInfo.InitialAttemptTimestamp,
+		},
+		SchedulerName: podInfo.Pod.Spec.SchedulerName,
+		Priority:      podInfo.GetPriority(), // TODO: Can we use this direct call?
 	}
 }
 

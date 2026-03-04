@@ -65,7 +65,7 @@ const (
 // It is serialized on the scheduling algorithm's host fitting.
 func (sched *Scheduler) ScheduleOne(ctx context.Context) {
 	logger := klog.FromContext(ctx)
-	entity, err := sched.NextPod(logger)
+	entity, err := sched.NextEntity(logger)
 	if err != nil {
 		utilruntime.HandleErrorWithLogger(logger, err, "Error while retrieving next scheduling entity from scheduling queue")
 		return
@@ -75,13 +75,16 @@ func (sched *Scheduler) ScheduleOne(ctx context.Context) {
 		return
 	}
 
-	if pgInfo, ok := entity.(*framework.QueuedPodGroupInfo); ok {
-		sched.scheduleOnePodGroup(ctx, pgInfo)
-	} else if podInfo, ok := entity.(*framework.QueuedPodInfo); ok {
-		if podInfo.Pod == nil {
+	switch specificEntity := entity.(type) {
+	case *framework.QueuedPodGroupInfo:
+		sched.scheduleOnePodGroup(ctx, specificEntity)
+	case *framework.QueuedPodInfo:
+		if specificEntity.Pod == nil {
 			return
 		}
-		sched.scheduleOnePod(ctx, podInfo)
+		sched.scheduleOnePod(ctx, specificEntity)
+	default:
+		utilruntime.HandleErrorWithLogger(logger, nil, "Unexpected entity", "type", fmt.Sprintf("%T", specificEntity))
 	}
 }
 

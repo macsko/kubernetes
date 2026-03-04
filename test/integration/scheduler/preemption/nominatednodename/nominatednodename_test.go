@@ -324,11 +324,11 @@ func TestNominatedNode(t *testing.T) {
 func initTestPreferNominatedNode(t *testing.T, nsPrefix string, opts ...scheduler.Option) *testutils.TestContext {
 	testCtx := testutils.InitTestSchedulerWithOptions(t, testutils.InitTestAPIServer(t, nsPrefix, nil), 0, opts...)
 	testutils.SyncSchedulerInformerFactory(testCtx)
-	// wraps the NextPod() method to make it appear the preemption has been done already and the nominated node has been set.
-	f := testCtx.Scheduler.NextPod
-	testCtx.Scheduler.NextPod = func(logger klog.Logger) (framework.QueuedEntityInfo, error) {
+	// wraps the NextEntity() method to make it appear the preemption has been done already and the nominated node has been set.
+	f := testCtx.Scheduler.NextEntity
+	testCtx.Scheduler.NextEntity = func(logger klog.Logger) (framework.QueuedEntityInfo, error) {
 		entity, _ := f(klog.FromContext(testCtx.Ctx))
-		// Scheduler.Next() may return nil when scheduler is shutting down.
+		// Scheduler.NextEntity() may return nil when scheduler is shutting down.
 		if entity != nil {
 			if podInfo, ok := entity.(*framework.QueuedPodInfo); ok { // TODO:
 				podInfo.Pod.Status.NominatedNodeName = "node-1"

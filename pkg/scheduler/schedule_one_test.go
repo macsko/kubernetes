@@ -1080,7 +1080,7 @@ func TestSchedulerScheduleOne(t *testing.T) {
 		sched := &Scheduler{
 			Cache:                                  cache,
 			client:                                 client,
-			NextPod:                                queue.Pop,
+			NextEntity:                             queue.Pop,
 			SchedulingQueue:                        queue,
 			Profiles:                               profile.Map{testSchedulerName: schedFramework},
 			APIDispatcher:                          apiDispatcher,
@@ -1704,7 +1704,7 @@ func TestScheduleOneMarksPodAsProcessedBeforePreBind(t *testing.T) {
 					sched := &Scheduler{
 						Cache:           cache,
 						client:          client,
-						NextPod:         queue.Pop,
+						NextEntity:      queue.Pop,
 						SchedulingQueue: queue,
 						Profiles:        profile.Map{testSchedulerName: schedFramework},
 						APIDispatcher:   apiDispatcher,
@@ -4574,7 +4574,7 @@ func setupTestScheduler(ctx context.Context, t *testing.T, client clientset.Inte
 		client:                   client,
 		nodeInfoSnapshot:         snapshot,
 		percentageOfNodesToScore: schedulerapi.DefaultPercentageOfNodesToScore,
-		NextPod: func(logger klog.Logger) (framework.QueuedEntityInfo, error) {
+		NextEntity: func(logger klog.Logger) (framework.QueuedEntityInfo, error) {
 			return &framework.QueuedPodInfo{PodInfo: mustNewPodInfo(t, pop(queuedPodStore).(*v1.Pod))}, nil
 		},
 		SchedulingQueue: schedulingQueue,

@@ -223,11 +223,12 @@ func (bq *backoffQueue) getBackoffTime(entity framework.QueuedEntityInfo) time.T
 		// If podMaxBackoff is set to 0, the backoff should be disabled completely.
 		return time.Time{}
 	}
-	count := entity.GetUnschedulableCount()
-	if entity.GetConsecutiveErrorsCount() > 0 {
+	queueingParams := entity.GetQueueingParams()
+	count := queueingParams.UnschedulableCount
+	if queueingParams.ConsecutiveErrorsCount > 0 {
 		// This entity has experienced an error status at the last scheduling cycle,
 		// and we should consider the error count for the backoff duration.
-		count = entity.GetConsecutiveErrorsCount()
+		count = queueingParams.ConsecutiveErrorsCount
 	}
 
 	if count == 0 {
@@ -236,12 +237,12 @@ func (bq *backoffQueue) getBackoffTime(entity framework.QueuedEntityInfo) time.T
 		return time.Time{}
 	}
 
-	if entity.GetBackoffExpiration().IsZero() {
+	if queueingParams.BackoffExpiration.IsZero() {
 		duration := bq.calculateBackoffDuration(count)
-		entity.SetBackoffExpiration(bq.alignToWindow(entity.GetTimestamp().Add(duration)))
+		queueingParams.BackoffExpiration = bq.alignToWindow(queueingParams.Timestamp.Add(duration))
 	}
 
-	return entity.GetBackoffExpiration()
+	return queueingParams.BackoffExpiration
 }
 
 // calculateBackoffDuration is a helper function for calculating the backoffDuration
@@ -296,7 +297,7 @@ func (bq *backoffQueue) add(logger klog.Logger, entity framework.QueuedEntityInf
 
 	// If entity has empty both unschedulable plugins and pending plugins,
 	// it means that it failed because of error and should be moved to podErrorBackoffQ.
-	if entity.GetUnschedulablePlugins().Len() == 0 && entity.GetPendingPlugins().Len() == 0 {
+	if entity.GetQueueingParams().UnschedulablePlugins.Len() == 0 && entity.GetQueueingParams().PendingPlugins.Len() == 0 {
 		bq.podErrorBackoffQ.AddOrUpdate(entity)
 		// Ensure the entity is not in the podBackoffQ and report the error if it happens.
 		err := bq.podBackoffQ.Delete(entity)

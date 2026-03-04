@@ -397,6 +397,7 @@ func (sched *Scheduler) submitPodGroupAlgorithmResult(ctx context.Context, sched
 			unschedulablePods++
 		}
 	}
+	
 	logger := klog.FromContext(ctx)
 	switch result.status {
 	case podGroupFeasible:
@@ -411,6 +412,6 @@ func (sched *Scheduler) submitPodGroupAlgorithmResult(ctx context.Context, sched
 	}
 	err := sched.SchedulingQueue.AddAttemptedPodGroupIfNotPresent(logger, podGroupInfo, sched.SchedulingQueue.SchedulingCycle())
 	if err != nil {
-
+		utilruntime.HandleErrorWithContext(ctx, err, "Failed to add attempted pod group to scheduling queue", "podGroup", klog.KObj(podGroupInfo))
 	}
 }

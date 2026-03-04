@@ -292,7 +292,7 @@ func (aq *activeQueue) moveEntityToInFlight(entity framework.QueuedEntityInfo) e
 // unlockedMoveEntityToInFlight moves the entity to the in-flight state.
 // This method should be called under the lock.
 func (aq *activeQueue) unlockedMoveEntityToInFlight(entity framework.QueuedEntityInfo) error {
-	entity.IncAttempts()
+	entity.GetQueueingParams().Attempts++
 	if aq.isSchedulingQueueHintEnabled {
 		var err error
 		entity.ForEachPod(func(pInfo *framework.QueuedPodInfo) bool {
@@ -314,9 +314,12 @@ func (aq *activeQueue) unlockedMoveEntityToInFlight(entity framework.QueuedEntit
 	aq.schedCycle++
 
 	// Update metrics for unschedulable plugins.
-	for plugin := range entity.GetUnschedulablePlugins().Union(entity.GetPendingPlugins()) {
-		metrics.UnschedulableReason(plugin, entity.GetSchedulerName()).Dec() // TODO: Metric for pods?
-	}
+	entity.ForEachPod(func(pInfo *framework.QueuedPodInfo) bool {
+		for plugin := range pInfo.UnschedulablePlugins.Union(pInfo.PendingPlugins) {
+			metrics.UnschedulableReason(plugin, pInfo.Pod.Spec.SchedulerName).Dec()
+		}
+		return true
+	})
 	return nil
 }
 
