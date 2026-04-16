@@ -448,16 +448,16 @@ type PreEnqueuePlugin interface {
 	PreEnqueue(ctx context.Context, p *v1.Pod) *Status
 }
 
-// LessFunc is the function to sort pod info
-type LessFunc func(podInfo1, podInfo2 QueuedPodInfo) bool
+// LessFunc is the function to sort entity info
+type LessFunc func(entity1, entity2 QueuedEntityInfo) bool
 
 // QueueSortPlugin is an interface that must be implemented by "QueueSort" plugins.
-// These plugins are used to sort pods in the scheduling queue. Only one queue sort
+// These plugins are used to sort entities in the scheduling queue. Only one queue sort
 // plugin may be enabled at a time.
 type QueueSortPlugin interface {
 	Plugin
-	// Less are used to sort pods in the scheduling queue.
-	Less(QueuedPodInfo, QueuedPodInfo) bool
+	// Less are used to sort entities in the scheduling queue.
+	Less(QueuedEntityInfo, QueuedEntityInfo) bool
 }
 
 // EnqueueExtensions is an optional interface that plugins can implement to efficiently

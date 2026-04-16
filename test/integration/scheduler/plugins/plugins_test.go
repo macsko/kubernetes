@@ -42,7 +42,6 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	listersv1 "k8s.io/client-go/listers/core/v1"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
-	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/klog/v2"
 	configv1 "k8s.io/kube-scheduler/config/v1"
 	fwk "k8s.io/kube-scheduler/framework"
@@ -84,7 +83,7 @@ func newPlugin(plugin fwk.Plugin) frameworkruntime.PluginFactory {
 
 type QueueSortPlugin struct {
 	// lessFunc is used to compare two queued pod infos.
-	lessFunc func(info1, info2 fwk.QueuedPodInfo) bool
+	lessFunc func(info1, info2 fwk.QueuedEntityInfo) bool
 }
 
 type PreEnqueuePlugin struct {
@@ -337,7 +336,7 @@ func (ep *QueueSortPlugin) Name() string {
 	return queuesortPluginName
 }
 
-func (ep *QueueSortPlugin) Less(info1, info2 fwk.QueuedPodInfo) bool {
+func (ep *QueueSortPlugin) Less(info1, info2 fwk.QueuedEntityInfo) bool {
 	if ep.lessFunc != nil {
 		return ep.lessFunc(info1, info2)
 	}
@@ -345,7 +344,7 @@ func (ep *QueueSortPlugin) Less(info1, info2 fwk.QueuedPodInfo) bool {
 	return true
 }
 
-func NewQueueSortPlugin(lessFunc func(info1, info2 fwk.QueuedPodInfo) bool) *QueueSortPlugin {
+func NewQueueSortPlugin(lessFunc func(info1, info2 fwk.QueuedEntityInfo) bool) *QueueSortPlugin {
 	return &QueueSortPlugin{
 		lessFunc: lessFunc,
 	}
@@ -808,13 +807,13 @@ func TestQueueSortPlugin(t *testing.T) {
 		name           string
 		podNames       []string
 		expectedOrder  []string
-		customLessFunc func(info1, info2 fwk.QueuedPodInfo) bool
+		customLessFunc func(info1, info2 fwk.QueuedEntityInfo) bool
 	}{
 		{
 			name:          "timestamp_sort_order",
 			podNames:      []string{"pod-1", "pod-2", "pod-3"},
 			expectedOrder: []string{"pod-1", "pod-2", "pod-3"},
-			customLessFunc: func(info1, info2 fwk.QueuedPodInfo) bool {
+			customLessFunc: func(info1, info2 fwk.QueuedEntityInfo) bool {
 				return info1.GetTimestamp().Before(info2.GetTimestamp())
 			},
 		},
@@ -822,9 +821,9 @@ func TestQueueSortPlugin(t *testing.T) {
 			name:          "priority_sort_order",
 			podNames:      []string{"pod-1", "pod-2", "pod-3"},
 			expectedOrder: []string{"pod-3", "pod-2", "pod-1"}, // depends on pod priority
-			customLessFunc: func(info1, info2 fwk.QueuedPodInfo) bool {
-				p1 := corev1helpers.PodPriority(info1.GetPodInfo().GetPod())
-				p2 := corev1helpers.PodPriority(info2.GetPodInfo().GetPod())
+			customLessFunc: func(info1, info2 fwk.QueuedEntityInfo) bool {
+				p1 := info1.GetPriority()
+				p2 := info2.GetPriority()
 				return (p1 > p2) || (p1 == p2 && info1.GetTimestamp().Before(info2.GetTimestamp()))
 			},
 		},

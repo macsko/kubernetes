@@ -805,7 +805,7 @@ func (f *frameworkImpl) QueueSortFunc() fwk.LessFunc {
 	if f == nil {
 		// If frameworkImpl is nil, simply keep their order unchanged.
 		// NOTE: this is primarily for tests.
-		return func(_, _ fwk.QueuedPodInfo) bool { return false }
+		return func(_, _ fwk.QueuedEntityInfo) bool { return false }
 	}
 
 	if len(f.queueSortPlugins) == 0 {

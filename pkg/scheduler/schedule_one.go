@@ -66,32 +66,26 @@ const (
 // It is serialized on the scheduling algorithm's host fitting.
 func (sched *Scheduler) ScheduleOne(ctx context.Context) {
 	logger := klog.FromContext(ctx)
-	podInfo, err := sched.NextPod(logger)
+	entity, err := sched.NextEntity(logger)
 	if err != nil {
-		utilruntime.HandleErrorWithLogger(logger, err, "Error while retrieving next pod from scheduling queue")
+		utilruntime.HandleErrorWithLogger(logger, err, "Error while retrieving next scheduling entity from scheduling queue")
 		return
 	}
-	// pod could be nil when schedulerQueue is closed
-	if podInfo == nil || podInfo.Pod == nil {
+	// entity could be nil when schedulerQueue is closed
+	if entity == nil {
 		return
 	}
-	if sched.genericWorkloadEnabled && podInfo.Pod.Spec.SchedulingGroup != nil {
-		podGroupInfo, err := sched.podGroupInfoForPod(ctx, podInfo)
-		if err != nil {
-			podFwk, err := sched.frameworkForPod(podInfo.Pod)
-			if err != nil {
-				// This shouldn't happen, because we only accept for scheduling the pods
-				// which specify a scheduler name that matches one of the profiles.
-				klog.FromContext(ctx).Error(err, "Error occurred")
-				sched.SchedulingQueue.Done(podInfo.Pod.UID)
-				return
-			}
-			sched.FailureHandler(ctx, podFwk, podInfo, fwk.AsStatus(err), nil, time.Now())
+
+	switch specificEntity := entity.(type) {
+	case *framework.QueuedPodGroupInfo:
+		sched.scheduleOnePodGroup(ctx, specificEntity)
+	case *framework.QueuedPodInfo:
+		if specificEntity.Pod == nil {
 			return
 		}
-		sched.scheduleOnePodGroup(ctx, podGroupInfo)
-	} else {
-		sched.scheduleOnePod(ctx, podInfo)
+		sched.scheduleOnePod(ctx, specificEntity)
+	default:
+		utilruntime.HandleErrorWithLogger(logger, nil, "Unexpected entity", "type", fmt.Sprintf("%T", specificEntity))
 	}
 }
 
@@ -111,12 +105,12 @@ func (sched *Scheduler) scheduleOnePod(ctx context.Context, podInfo *framework.Q
 		// This shouldn't happen, because we only accept for scheduling the pods
 		// which specify a scheduler name that matches one of the profiles.
 		logger.Error(err, "Error occurred")
-		sched.SchedulingQueue.Done(pod.UID)
+		sched.SchedulingQueue.Done(podInfo.Pod.UID)
 		return
 	}
 	if sched.skipPodSchedule(ctx, fwk, pod) {
 		// We don't put this Pod back to the queue, but we have to cleanup the in-flight pods/events.
-		sched.SchedulingQueue.Done(pod.UID)
+		sched.SchedulingQueue.Done(podInfo.Pod.UID)
 		return
 	}
 
@@ -1261,7 +1255,7 @@ func (sched *Scheduler) handleSchedulingFailure(ctx context.Context, podFwk fram
 			// and we can't fix the validation for backwards compatibility.
 			podInfo.PodInfo, _ = framework.NewPodInfo(cachedPod.DeepCopy())
 			pod = podInfo.Pod
-			if err := sched.SchedulingQueue.AddUnschedulableIfNotPresent(logger, podInfo, sched.SchedulingQueue.SchedulingCycle()); err != nil {
+			if err := sched.SchedulingQueue.AddUnschedulablePodIfNotPresent(logger, podInfo, sched.SchedulingQueue.SchedulingCycle()); err != nil {
 				utilruntime.HandleErrorWithContext(ctx, err, "Error occurred")
 			}
 			calledDone = true
