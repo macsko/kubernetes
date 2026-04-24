@@ -300,6 +300,60 @@ type NodeInfo interface {
 	SetNode(node *v1.Node)
 }
 
+// QueuedEntityInfo is an interface that represents a schedulable entity in the scheduling queue.
+// It can be a single Pod (QueuedPodInfo) or a group of Pods (QueuedPodGroupInfo).
+type QueuedEntityInfo interface {
+	// Type returns the type of the entity, e.g., "pod" or "podgroup".
+	Type() string
+	// GetPriority returns the priority of the entity.
+	GetPriority() int32
+	// GetTimestamp returns the time pod added to the scheduling queue.
+	GetTimestamp() time.Time
+	// GetAttempts returns the number of all schedule attempts before successfully scheduled.
+	// It's used to record the # attempts metric.
+	GetAttempts() int
+	// GetBackoffExpiration returns the time when the Pod will complete its backoff.
+	// If the SchedulerPopFromBackoffQ feature is enabled, the value is aligned to the backoff ordering window.
+	// Then, two Pods with the same BackoffExpiration (time bucket) are ordered by priority and eventually the timestamp,
+	// to make sure popping from the backoffQ considers priority of pods that are close to the expiration time.
+	GetBackoffExpiration() time.Time
+	// GetUnschedulableCount returns the total number of the scheduling attempts that this Pod gets unschedulable.
+	// Basically it equals Attempts, but when the Pod fails with the Error status (e.g., the network error),
+	// this count won't be incremented.
+	// It's used to calculate the backoff time this Pod is obliged to get before retrying.
+	GetUnschedulableCount() int
+	// GetConsecutiveErrorsCount returns the number of the error status that this Pod gets sequentially.
+	// This count is reset when the Pod gets another status than Error.
+	//
+	// If the error status is returned (e.g., kube-apiserver is unstable), we don't want to immediately retry the Pod and hence need a backoff retry mechanism
+	// because that might push more burden to the kube-apiserver.
+	// But, we don't want to calculate the backoff time in the same way as the normal unschedulable reason
+	// since the purpose is different; the backoff for a unschedulable status etc is for the punishment of wasting the scheduling cycles,
+	// whereas the backoff for the error status is for the protection of the kube-apiserver.
+	// That's why we need to distinguish ConsecutiveErrorsCount for the error status and UnschedulableCount for the unschedulable status.
+	// See https://github.com/kubernetes/kubernetes/issues/128744 for the discussion.
+	GetConsecutiveErrorsCount() int
+	// GetInitialAttemptTimestamp returns the time when the pod is added to the queue for the first time. The pod may be added
+	// back to the queue multiple times before it's successfully scheduled.
+	// It shouldn't be updated once initialized. It's used to record the e2e scheduling
+	// latency for a pod.
+	GetInitialAttemptTimestamp() *time.Time
+	// GetUnschedulablePlugins records the plugin names that the Pod failed with Unschedulable or UnschedulableAndUnresolvable status
+	// at specific extension points: PreFilter, Filter, Reserve, or Permit (WaitOnPermit).
+	// If Pods are rejected at other extension points,
+	// they're assumed to be unexpected errors (e.g., temporal network issue, plugin implementation issue, etc)
+	// and retried soon after a backoff period.
+	// That is because such failures could be solved regardless of incoming cluster events (registered in EventsToRegister).
+	GetUnschedulablePlugins() sets.Set[string]
+	// GetPendingPlugins records the plugin names that the Pod failed with Pending status.
+	GetPendingPlugins() sets.Set[string]
+	// GetGatingPlugin records the plugin name that gated the Pod at PreEnqueue.
+	GetGatingPlugin() string
+	// GetGatingPluginEvents records the events registered by the plugin that gated the Pod at PreEnqueue.
+	// We have it as a cache purpose to avoid re-computing which event(s) might ungate the Pod.
+	GetGatingPluginEvents() []ClusterEvent
+}
+
 // QueuedPodInfo is a Pod wrapper with additional information related to
 // the pod's status in the scheduling queue, such as the timestamp when
 // it's added to the queue.

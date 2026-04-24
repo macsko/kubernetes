@@ -31,6 +31,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/klog/v2"
 
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -550,11 +551,33 @@ func nextGeneration() int64 {
 	return atomic.AddInt64(&generation, 1)
 }
 
-// QueuedPodInfo is a Pod wrapper with additional information related to
-// the pod's status in the scheduling queue, such as the timestamp when
-// it's added to the queue.
-type QueuedPodInfo struct {
-	*PodInfo
+// QueuedEntityInfo is an interface that represents a schedulable entity in the scheduling queue.
+// It can be a single Pod (QueuedPodInfo) or a group of Pods (QueuedPodGroupInfo).
+type QueuedEntityInfo interface {
+	// Type returns the type of the entity, e.g., "pod" or "podgroup".
+	Type() string
+	// GetName returns the name of the entity.
+	GetName() string
+	// GetNamespace returns the namespace of the entity.
+	GetNamespace() string
+	// ForEachPodInfo iterates over all QueuedPodInfos in the entity and applies the function fn.
+	// If fn returns false, the iteration stops.
+	ForEachPodInfo(fn func(pInfo *QueuedPodInfo) bool)
+	// Update updates the specified pod in the entity and returns the updated QueuedPodInfo.
+	Update(pod *v1.Pod) (*QueuedPodInfo, error)
+	// Gated returns true if the entity is gated by any plugin at PreEnqueue.
+	Gated() bool
+	// GetPriority returns the priority of the entity.
+	GetPriority() int32
+	// GetQueueingParams returns the queueing parameters associated with the entity.
+	GetQueueingParams() *QueueingParams
+	// Size returns the number of pods in the entity.
+	Size() int
+}
+
+// QueueingParams holds parameters related to the queueing status and history of an entity
+// (Pod or PodGroup) in the scheduling queue.
+type QueueingParams struct {
 	// The time pod added to the scheduling queue.
 	Timestamp time.Time
 	// Number of all schedule attempts before successfully scheduled.
@@ -606,127 +629,133 @@ type QueuedPodInfo struct {
 	// GatingPluginEvents records the events registered by the plugin that gated the Pod at PreEnqueue.
 	// We have it as a cache purpose to avoid re-computing which event(s) might ungate the Pod.
 	GatingPluginEvents []fwk.ClusterEvent
+}
+
+func (qp *QueueingParams) GetTimestamp() time.Time {
+	if qp == nil {
+		return time.Time{}
+	}
+	return qp.Timestamp
+}
+
+func (qp *QueueingParams) GetAttempts() int {
+	return qp.Attempts
+}
+
+func (qp *QueueingParams) GetBackoffExpiration() time.Time {
+	return qp.BackoffExpiration
+}
+
+func (qp *QueueingParams) GetUnschedulableCount() int {
+	return qp.UnschedulableCount
+}
+
+func (qp *QueueingParams) GetConsecutiveErrorsCount() int {
+	return qp.ConsecutiveErrorsCount
+}
+
+func (qp *QueueingParams) GetInitialAttemptTimestamp() *time.Time {
+	return qp.InitialAttemptTimestamp
+}
+
+func (qp *QueueingParams) GetUnschedulablePlugins() sets.Set[string] {
+	return qp.UnschedulablePlugins
+}
+
+func (qp *QueueingParams) GetPendingPlugins() sets.Set[string] {
+	return qp.PendingPlugins
+}
+
+func (qp *QueueingParams) GetGatingPlugin() string {
+	return qp.GatingPlugin
+}
+
+func (qp *QueueingParams) GetGatingPluginEvents() []fwk.ClusterEvent {
+	return qp.GatingPluginEvents
+}
+
+// DeepCopy returns a deep copy of the QueueingParams object.
+func (qp *QueueingParams) DeepCopy() QueueingParams {
+	return QueueingParams{
+		Timestamp:               qp.Timestamp,
+		Attempts:                qp.Attempts,
+		UnschedulableCount:      qp.UnschedulableCount,
+		InitialAttemptTimestamp: qp.InitialAttemptTimestamp,
+		BackoffExpiration:       qp.BackoffExpiration,
+		UnschedulablePlugins:    qp.UnschedulablePlugins.Clone(),
+		PendingPlugins:          qp.PendingPlugins.Clone(),
+		GatingPlugin:            qp.GatingPlugin,
+		GatingPluginEvents:      slices.Clone(qp.GatingPluginEvents),
+		ConsecutiveErrorsCount:  qp.ConsecutiveErrorsCount,
+	}
+}
+
+// QueuedPodInfo is a Pod wrapper with additional information related to
+// the pod's status in the scheduling queue, such as the timestamp when
+// it's added to the queue.
+type QueuedPodInfo struct {
+	*PodInfo
+	QueueingParams
 	// PodSignature for opportunistic batching
 	PodSignature fwk.PodSignature
+}
+
+func (pqi *QueuedPodInfo) Type() string {
+	return "pod"
+}
+
+func (pqi *QueuedPodInfo) GetQueueingParams() *QueueingParams {
+	return &pqi.QueueingParams
+}
+
+func (pqi *QueuedPodInfo) ForEachPodInfo(fn func(pInfo *QueuedPodInfo) bool) {
+	_ = fn(pqi)
+}
+
+// Update updates the pod in QueuedPodInfo and clears the cached PodSignature,
+// since the updated pod may no longer match the signature computed for the previous version.
+func (pqi *QueuedPodInfo) Update(pod *v1.Pod) (*QueuedPodInfo, error) {
+	pqi.PodSignature = nil
+	err := pqi.PodInfo.Update(pod)
+	return pqi, err
 }
 
 func (pqi *QueuedPodInfo) GetPodInfo() fwk.PodInfo {
 	return pqi.PodInfo
 }
 
-func (pqi *QueuedPodInfo) GetTimestamp() time.Time {
-	return pqi.Timestamp
-}
-
-func (pqi *QueuedPodInfo) GetAttempts() int {
-	return pqi.Attempts
-}
-
-func (pqi *QueuedPodInfo) GetBackoffExpiration() time.Time {
-	return pqi.BackoffExpiration
-}
-
-func (pqi *QueuedPodInfo) GetUnschedulableCount() int {
-	return pqi.UnschedulableCount
-}
-
-func (pqi *QueuedPodInfo) GetConsecutiveErrorsCount() int {
-	return pqi.ConsecutiveErrorsCount
-}
-
-func (pqi *QueuedPodInfo) GetInitialAttemptTimestamp() *time.Time {
-	return pqi.InitialAttemptTimestamp
-}
-
-func (pqi *QueuedPodInfo) GetUnschedulablePlugins() sets.Set[string] {
-	return pqi.UnschedulablePlugins
-}
-
-func (pqi *QueuedPodInfo) GetPendingPlugins() sets.Set[string] {
-	return pqi.PendingPlugins
-}
-
-func (pqi *QueuedPodInfo) GetGatingPlugin() string {
-	return pqi.GatingPlugin
-}
-
-func (pqi *QueuedPodInfo) GetGatingPluginEvents() []fwk.ClusterEvent {
-	return pqi.GatingPluginEvents
-}
-
 // Gated returns true if the pod is gated by any plugin.
 func (pqi *QueuedPodInfo) Gated() bool {
-	return pqi.GatingPlugin != ""
+	return pqi.QueueingParams.GatingPlugin != ""
+}
+
+func (pqi *QueuedPodInfo) GetPriority() int32 {
+	return corev1helpers.PodPriority(pqi.GetPod())
 }
 
 // DeepCopy returns a deep copy of the QueuedPodInfo object.
 func (pqi *QueuedPodInfo) DeepCopy() *QueuedPodInfo {
 	return &QueuedPodInfo{
-		PodInfo:                 pqi.PodInfo.DeepCopy(),
-		Timestamp:               pqi.Timestamp,
-		Attempts:                pqi.Attempts,
-		UnschedulableCount:      pqi.UnschedulableCount,
-		InitialAttemptTimestamp: pqi.InitialAttemptTimestamp,
-		UnschedulablePlugins:    pqi.UnschedulablePlugins.Clone(),
-		BackoffExpiration:       pqi.BackoffExpiration,
-		GatingPlugin:            pqi.GatingPlugin,
-		GatingPluginEvents:      slices.Clone(pqi.GatingPluginEvents),
-		PendingPlugins:          pqi.PendingPlugins.Clone(),
-		ConsecutiveErrorsCount:  pqi.ConsecutiveErrorsCount,
-		PodSignature:            pqi.PodSignature,
+		PodInfo:        pqi.PodInfo.DeepCopy(),
+		QueueingParams: pqi.QueueingParams.DeepCopy(),
+		PodSignature:   pqi.PodSignature,
 	}
 }
 
-// Update updates the pod in QueuedPodInfo and clears the cached PodSignature,
-// since the updated pod may no longer match the signature computed for the previous version.
-func (pqi *QueuedPodInfo) Update(pod *v1.Pod) error {
-	pqi.PodSignature = nil
-	return pqi.PodInfo.Update(pod)
+func (pqi *QueuedPodInfo) Size() int {
+	return 1
 }
 
 // ClearRejectorPlugins clears the plugin-related fields that track why a pod
 // was rejected in a previous scheduling attempt.
 func (pqi *QueuedPodInfo) ClearRejectorPlugins() {
-	pqi.UnschedulablePlugins.Clear()
-	pqi.PendingPlugins.Clear()
-	pqi.GatingPlugin = ""
-	pqi.GatingPluginEvents = nil
+	pqi.QueueingParams.UnschedulablePlugins.Clear()
+	pqi.QueueingParams.PendingPlugins.Clear()
+	pqi.QueueingParams.GatingPlugin = ""
+	pqi.QueueingParams.GatingPluginEvents = nil
 }
 
-// QueuedPodGroupInfo is a PodGroupInfo wrapper with additional information related to
-// the pod group's status in the scheduling queue and stores all queued pods from that pod group.
-type QueuedPodGroupInfo struct {
-	*PodGroupInfo
-	// QueuedPodInfos are the pod group's pods that are currently queued.
-	// The order of the pods is deterministic and based on the priority and InitialAttemptTimestamp.
-	QueuedPodInfos []*QueuedPodInfo
-}
 
-// PodGroupInfo is a wrapper around the PodGroup API object together with a list of pods that belong to the pod group.
-// Typically used as an input to pod group scheduling cycle plugins.
-type PodGroupInfo struct {
-	// Namespace is a namespace of this pod group.
-	Namespace string
-	// Name is a name of this pod group.
-	Name string
-	// UnscheduledPods are pods that are currently being considered for scheduling.
-	// It can be useful to also retrieve the scheduled (assumed or assigned) pods.
-	// PodGroupManager.PodGroupState can be used for that.
-	// The order of the pods is deterministic and based on signature, priority and timestamp.
-	UnscheduledPods []*v1.Pod
-}
-
-func (pgi *PodGroupInfo) GetName() string {
-	return pgi.Name
-}
-
-func (pgi *PodGroupInfo) GetNamespace() string {
-	return pgi.Namespace
-}
-
-func (pgi *PodGroupInfo) GetUnscheduledPods() []*v1.Pod {
-	return pgi.UnscheduledPods
-}
 
 // PodInfo is a wrapper to a Pod with additional pre-computed information to
 // accelerate processing. This information is typically immutable (e.g., pre-processed
@@ -746,6 +775,14 @@ type PodInfo struct {
 	// Note: cachedResource field shouldn't be accessed directly.
 	// Use calculateResource method to obtain it instead.
 	cachedResource *fwk.PodResource
+}
+
+func (pi *PodInfo) GetName() string {
+	return pi.Pod.Name
+}
+
+func (pi *PodInfo) GetNamespace() string {
+	return pi.Pod.Namespace
 }
 
 func (pi *PodInfo) GetPod() *v1.Pod {
@@ -1179,6 +1216,11 @@ func GetPodKey(pod *v1.Pod) (string, error) {
 		return "", errors.New("cannot get cache key for pod with empty UID")
 	}
 	return uid, nil
+}
+
+// GetPodNamespacedName returns the string format of a pod's namespaced name.
+func GetPodNamespacedName(pod *v1.Pod) string {
+	return GetNamespacedName(pod.Namespace, pod.Name)
 }
 
 // GetNamespacedName returns the string format of a namespaced resource name.
