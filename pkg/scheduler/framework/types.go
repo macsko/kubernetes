@@ -19,6 +19,7 @@ package framework
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"strings"
@@ -755,7 +756,148 @@ func (pqi *QueuedPodInfo) ClearRejectorPlugins() {
 	pqi.QueueingParams.GatingPluginEvents = nil
 }
 
+// QueuedPodGroupInfo is a PodGroupInfo wrapper with additional information related to
+// the pod group's status in the scheduling queue and stores all queued pods from that pod group.
+type QueuedPodGroupInfo struct {
+	*PodGroupInfo
+	QueueingParams
+	// QueuedPodInfos are the pod group's pods that are currently queued.
+	// The order of the pods is deterministic and based on the priority and InitialAttemptTimestamp.
+	QueuedPodInfos []*QueuedPodInfo
+	// Priority is the maximum priority among the pod group's member pods.
+	// It's computed lazily on the first access.
+	Priority *int32
+}
 
+func (pgqi *QueuedPodGroupInfo) Type() string {
+	return "podgroup"
+}
+
+func (pgqi *QueuedPodGroupInfo) GetQueueingParams() *QueueingParams {
+	return &pgqi.QueueingParams
+}
+
+// AddPod adds a pod to the queued pod group info.
+func (pgqi *QueuedPodGroupInfo) AddPod(pInfo *QueuedPodInfo) {
+	index, _ := slices.BinarySearchFunc(pgqi.QueuedPodInfos, pInfo, PodGroupMemberPodsOrderingFunc)
+	pgqi.QueuedPodInfos = slices.Insert(pgqi.QueuedPodInfos, index, pInfo)
+	pgqi.UnscheduledPods = slices.Insert(pgqi.UnscheduledPods, index, pInfo.Pod)
+	pgqi.Priority = nil
+}
+
+// RemovePod removes a pod from the queued pod group info.
+func (pgqi *QueuedPodGroupInfo) RemovePod(pod *v1.Pod) *QueuedPodInfo {
+	for i, pInfo := range pgqi.QueuedPodInfos {
+		if pInfo.Pod.Name == pod.Name && pInfo.Pod.Namespace == pod.Namespace {
+			pgqi.QueuedPodInfos = slices.Delete(pgqi.QueuedPodInfos, i, i+1)
+			pgqi.UnscheduledPods = slices.Delete(pgqi.UnscheduledPods, i, i+1)
+			pgqi.Priority = nil
+			return pInfo
+		}
+	}
+	return nil
+}
+
+// SetPods sets the pods in the queued pod group info, overwriting the existing ones.
+func (pgqi *QueuedPodGroupInfo) SetPods(pInfos []*QueuedPodInfo) {
+	pgqi.QueuedPodInfos = pInfos
+	slices.SortStableFunc(pgqi.QueuedPodInfos, PodGroupMemberPodsOrderingFunc)
+	pgqi.UnscheduledPods = make([]*v1.Pod, 0, len(pgqi.QueuedPodInfos))
+	for _, pInfo := range pgqi.QueuedPodInfos {
+		pgqi.UnscheduledPods = append(pgqi.UnscheduledPods, pInfo.Pod)
+	}
+	pgqi.Priority = nil
+}
+
+// PodGroupMemberPodsOrderingFunc orders pod group member pods by priority (descending)
+// and then by timestamp (ascending).
+func PodGroupMemberPodsOrderingFunc(a, b *QueuedPodInfo) int {
+	if a.GetPriority() > b.GetPriority() {
+		return -1
+	} else if a.GetPriority() < b.GetPriority() {
+		return 1
+	}
+	// Priorities are equal, use Timestamp as tie-breaker.
+	if a.Timestamp.Before(b.Timestamp) {
+		return -1
+	} else if a.Timestamp.After(b.Timestamp) {
+		return 1
+	}
+	// Return 0 when priority and timestamp are equal.
+	// This relies on slices.SortStableFunc to preserve consistent order for the same set of pods.
+	return 0
+}
+
+func (pgqi *QueuedPodGroupInfo) ForEachPodInfo(fn func(pInfo *QueuedPodInfo) bool) {
+	for _, pInfo := range pgqi.QueuedPodInfos {
+		ok := fn(pInfo)
+		if !ok {
+			return
+		}
+	}
+}
+
+func (pgqi *QueuedPodGroupInfo) Update(pod *v1.Pod) (*QueuedPodInfo, error) {
+	for _, pInfo := range pgqi.QueuedPodInfos {
+		if pInfo.Pod.Name == pod.Name && pInfo.Pod.Namespace == pod.Namespace {
+			err := pInfo.PodInfo.Update(pod)
+			// Pod update shouldn't change the priority or timestamp, so it's safe to keep the precomputed pod group priority.
+			return pInfo, err
+		}
+	}
+	return nil, fmt.Errorf("pod %s/%s to update not found in the queued group info", pod.Namespace, pod.Name)
+}
+
+// Gated returns true if the pod is gated by any plugin.
+func (pgqi *QueuedPodGroupInfo) Gated() bool {
+	return pgqi.QueueingParams.GatingPlugin != ""
+}
+
+// GetPriority returns the maximum priority among the pod group's member pods.
+// The priority is computed lazily on the first access.
+func (pgqi *QueuedPodGroupInfo) GetPriority() int32 {
+	if pgqi.Priority != nil {
+		return *pgqi.Priority
+	}
+	priority := int32(math.MinInt32)
+	for _, pInfo := range pgqi.QueuedPodInfos {
+		if pInfo.GetPriority() > priority {
+			priority = pInfo.GetPriority()
+		}
+	}
+	pgqi.Priority = &priority
+	return priority
+}
+
+func (pgqi *QueuedPodGroupInfo) Size() int {
+	return len(pgqi.QueuedPodInfos)
+}
+
+// PodGroupInfo is a wrapper around the PodGroup API object together with a list of pods that belong to the pod group.
+// Typically used as an input to pod group scheduling cycle plugins.
+type PodGroupInfo struct {
+	// Namespace is a namespace of this pod group.
+	Namespace string
+	// Name is a name of this pod group.
+	Name string
+	// UnscheduledPods are pods that are currently being considered for scheduling.
+	// It can be useful to also retrieve the scheduled (assumed or assigned) pods.
+	// PodGroupManager.PodGroupState can be used for that.
+	// The order of the pods is deterministic and based on signature, priority and timestamp.
+	UnscheduledPods []*v1.Pod
+}
+
+func (pgi *PodGroupInfo) GetName() string {
+	return pgi.Name
+}
+
+func (pgi *PodGroupInfo) GetNamespace() string {
+	return pgi.Namespace
+}
+
+func (pgi *PodGroupInfo) GetUnscheduledPods() []*v1.Pod {
+	return pgi.UnscheduledPods
+}
 
 // PodInfo is a wrapper to a Pod with additional pre-computed information to
 // accelerate processing. This information is typically immutable (e.g., pre-processed

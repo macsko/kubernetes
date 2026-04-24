@@ -1182,10 +1182,13 @@ func NextPodOrDie(t *testing.T, testCtx *TestContext) *schedulerframework.Queued
 
 	var podInfo *schedulerframework.QueuedPodInfo
 	logger := klog.FromContext(testCtx.Ctx)
-	// NextPod() is a blocking operation. Wrap it in timeout() to avoid relying on
+	// NextEntity() is a blocking operation. Wrap it in timeout() to avoid relying on
 	// default go testing timeout (10m) to abort.
 	if err := timeout(testCtx.Ctx, time.Second*5, func() {
-		podInfo, _ = testCtx.Scheduler.NextPod(logger)
+		entity, _ := testCtx.Scheduler.NextEntity(logger)
+		if entity != nil {
+			podInfo = entity.(*schedulerframework.QueuedPodInfo) // TODO:
+		}
 	}); err != nil {
 		t.Fatalf("Timed out waiting for the Pod to be popped: %v", err)
 	}
