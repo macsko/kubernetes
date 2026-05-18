@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	v1 "k8s.io/api/core/v1"
@@ -43,6 +44,7 @@ import (
 
 var nodeInfoCmpOpts = []cmp.Option{
 	cmp.AllowUnexported(NodeInfo{}, PodInfo{}, fwk.PodResource{}),
+	cmpopts.IgnoreFields(NodeInfo{}, "PVCRefCountsDelta"),
 }
 
 func TestNewResource(t *testing.T) {

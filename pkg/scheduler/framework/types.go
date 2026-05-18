@@ -205,6 +205,10 @@ type NodeInfo struct {
 	// Keys are in the format "namespace/name".
 	PVCRefCounts map[string]int
 
+	// PVCRefCountsDelta contains the delta of changes to PVCRefCounts since the last snapshot.
+	// Keys are in the format "namespace/name".
+	PVCRefCountsDelta map[string]int
+
 	// Whenever NodeInfo changes, generation is bumped.
 	// This is used to avoid cloning it if the object didn't change.
 	Generation int64
@@ -312,6 +316,7 @@ func (n *NodeInfo) SnapshotConcrete() *NodeInfo {
 		UsedPorts:                     make(fwk.HostPortInfo),
 		ImageStates:                   make(map[string]*fwk.ImageStateSummary),
 		PVCRefCounts:                  make(map[string]int),
+		PVCRefCountsDelta:             make(map[string]int),
 		Generation:                    n.Generation,
 		DeclaredFeatures:              n.DeclaredFeatures.Clone(),
 		NodeAllocatableDRAClaimStates: make(map[types.NamespacedName]*fwk.NodeAllocatableDRAClaimState),
@@ -517,13 +522,23 @@ func (n *NodeInfo) updatePVCRefCounts(pod *v1.Pod, add bool) {
 		}
 
 		key := GetNamespacedName(pod.Namespace, v.PersistentVolumeClaim.ClaimName)
+		previous := n.PVCRefCounts[key]
 		if add {
 			n.PVCRefCounts[key] += 1
+			if previous == 0 {
+				n.PVCRefCountsDelta[key] += 1
+			}
 		} else {
 			n.PVCRefCounts[key] -= 1
+			if previous == 1 {
+				n.PVCRefCountsDelta[key] -= 1
+			}
 			if n.PVCRefCounts[key] <= 0 {
 				delete(n.PVCRefCounts, key)
 			}
+		}
+		if n.PVCRefCountsDelta[key] == 0 {
+			delete(n.PVCRefCountsDelta, key)
 		}
 	}
 }
@@ -1126,6 +1141,7 @@ func NewNodeInfo(pods ...*v1.Pod) *NodeInfo {
 		UsedPorts:                     make(fwk.HostPortInfo),
 		ImageStates:                   make(map[string]*fwk.ImageStateSummary),
 		PVCRefCounts:                  make(map[string]int),
+		PVCRefCountsDelta:             make(map[string]int),
 		NodeAllocatableDRAClaimStates: make(map[types.NamespacedName]*fwk.NodeAllocatableDRAClaimState),
 	}
 	for _, pod := range pods {

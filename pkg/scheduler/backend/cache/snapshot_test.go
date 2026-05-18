@@ -188,51 +188,58 @@ func TestCreateImageExistenceMap(t *testing.T) {
 	}
 }
 
-func TestCreateUsedPVCSet(t *testing.T) {
+func TestCreateUsedPVCRefCounts(t *testing.T) {
 	tests := []struct {
-		name     string
-		pods     []*v1.Pod
-		expected sets.Set[string]
+		name        string
+		nodeInfoMap map[string]*framework.NodeInfo
+		expected    map[string]int
 	}{
 		{
-			name:     "empty pods list",
-			pods:     []*v1.Pod{},
-			expected: sets.New[string](),
+			name:        "empty nodeInfoMap",
+			nodeInfoMap: map[string]*framework.NodeInfo{},
+			expected:    map[string]int{},
 		},
 		{
-			name: "pods not scheduled",
-			pods: []*v1.Pod{
-				st.MakePod().Name("foo").Namespace("foo").Obj(),
-				st.MakePod().Name("bar").Namespace("bar").Obj(),
+			name: "no PVCs used",
+			nodeInfoMap: map[string]*framework.NodeInfo{
+				"node1": framework.NewNodeInfo(),
+				"node2": framework.NewNodeInfo(),
 			},
-			expected: sets.New[string](),
+			expected: map[string]int{},
 		},
 		{
-			name: "scheduled pods that do not use any PVC",
-			pods: []*v1.Pod{
-				st.MakePod().Name("foo").Namespace("foo").Node("node-1").Obj(),
-				st.MakePod().Name("bar").Namespace("bar").Node("node-2").Obj(),
+			name: "PVCs used across nodes",
+			nodeInfoMap: map[string]*framework.NodeInfo{
+				"node1": {
+					PVCRefCounts: map[string]int{"ns/pvc1": 1},
+				},
+				"node2": {
+					PVCRefCounts: map[string]int{"ns/pvc1": 1, "ns/pvc2": 1},
+				},
 			},
-			expected: sets.New[string](),
-		},
-		{
-			name: "scheduled pods that use PVC",
-			pods: []*v1.Pod{
-				st.MakePod().Name("foo").Namespace("foo").Node("node-1").PVC("pvc1").Obj(),
-				st.MakePod().Name("bar").Namespace("bar").Node("node-2").PVC("pvc2").Obj(),
+			expected: map[string]int{
+				"ns/pvc1": 2,
+				"ns/pvc2": 1,
 			},
-			expected: sets.New("foo/pvc1", "bar/pvc2"),
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			usedPVCs := createUsedPVCSet(test.pods)
-			if diff := cmp.Diff(test.expected, usedPVCs); diff != "" {
-				t.Errorf("Unexpected usedPVCs (-want +got):\n%s", diff)
+			usedPVCRefCounts := createUsedPVCRefCounts(test.nodeInfoMap)
+			if diff := cmp.Diff(test.expected, usedPVCRefCounts); diff != "" {
+				t.Errorf("Unexpected usedPVCRefCounts (-want +got):\n%s", diff)
 			}
 		})
 	}
+}
+
+func getUsedPVCSet(snapshot *Snapshot) sets.Set[string] {
+	set := sets.New[string]()
+	for k := range snapshot.usedPVCRefCounts {
+		set.Insert(k)
+	}
+	return set
 }
 
 func TestNewSnapshot(t *testing.T) {
@@ -439,7 +446,7 @@ func TestNewSnapshot(t *testing.T) {
 				}
 			}
 
-			if diff := cmp.Diff(test.expectedUsedPVCSet, snapshot.usedPVCSet); diff != "" {
+			if diff := cmp.Diff(test.expectedUsedPVCSet, getUsedPVCSet(snapshot)); diff != "" {
 				t.Errorf("Unexpected usedPVCSet (-want +got):\n%s", diff)
 			}
 		})

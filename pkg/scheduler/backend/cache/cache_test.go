@@ -2386,7 +2386,7 @@ func TestSchedulerCache_UpdateSnapshot(t *testing.T) {
 			}
 
 			// Compare content of the used PVC set
-			if diff := cmp.Diff(test.expectedUsedPVCSet, snapshot.usedPVCSet); diff != "" {
+			if diff := cmp.Diff(test.expectedUsedPVCSet, getUsedPVCSet(snapshot)); diff != "" {
 				t.Errorf("Unexpected usedPVCSet (-want +got):\n%s", diff)
 			}
 
@@ -2456,7 +2456,7 @@ func compareCacheWithNodeInfoSnapshot(t *testing.T, cache *cacheImpl, snapshot *
 	}
 
 	for key := range expectedUsedPVCSet {
-		if !snapshot.usedPVCSet.Has(key) {
+		if !getUsedPVCSet(snapshot).Has(key) {
 			return fmt.Errorf("expected PVC %s to exist in UsedPVCSet but it is not found", key)
 		}
 	}

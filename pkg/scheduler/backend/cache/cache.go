@@ -210,9 +210,6 @@ func (cache *cacheImpl) UpdateSnapshot(logger klog.Logger, nodeSnapshot *Snapsho
 	// status from having pods with required anti-affinity to NOT having pods with required
 	// anti-affinity or the other way around.
 	updateNodesHavePodsWithRequiredAntiAffinity := false
-	// usedPVCSet must be re-created whenever the head node generation is greater than
-	// last snapshot generation.
-	updateUsedPVCSet := false
 
 	// Forget all assumed pods from a previous snapshot version.
 	// This is a safety check in case any pod wasn't forgotten in the previous scheduling cycle.
@@ -242,21 +239,31 @@ func (cache *cacheImpl) UpdateSnapshot(logger klog.Logger, nodeSnapshot *Snapsho
 			if (len(existing.PodsWithRequiredAntiAffinity) > 0) != (len(clone.PodsWithRequiredAntiAffinity) > 0) {
 				updateNodesHavePodsWithRequiredAntiAffinity = true
 			}
-			if !updateUsedPVCSet {
-				if len(existing.PVCRefCounts) != len(clone.PVCRefCounts) {
-					updateUsedPVCSet = true
-				} else {
-					for pvcKey := range clone.PVCRefCounts {
-						if _, found := existing.PVCRefCounts[pvcKey]; !found {
-							updateUsedPVCSet = true
-							break
-						}
-					}
+			for pvcKey, delta := range node.info.PVCRefCountsDelta {
+				if delta == 0 {
+					continue
 				}
+				nodeSnapshot.usedPVCRefCounts[pvcKey] += delta
+				if nodeSnapshot.usedPVCRefCounts[pvcKey] <= 0 {
+					delete(nodeSnapshot.usedPVCRefCounts, pvcKey)
+				}
+			}
+			if len(node.info.PVCRefCountsDelta) > 0 {
+				node.info.PVCRefCountsDelta = make(map[string]int)
 			}
 			// We need to preserve the original pointer of the NodeInfo struct since it
 			// is used in the NodeInfoList, which we may not update.
 			*existing = *clone
+		} else {
+			// Node was deleted: treat its entire remaining PVCRefCounts as a negative delta
+			for pvcKey := range node.info.PVCRefCounts {
+				nodeSnapshot.usedPVCRefCounts[pvcKey]--
+				if nodeSnapshot.usedPVCRefCounts[pvcKey] <= 0 {
+					delete(nodeSnapshot.usedPVCRefCounts, pvcKey)
+				}
+			}
+			// Clear the map so we don't decrement again in future cycles
+			node.info.PVCRefCounts = nil
 		}
 	}
 	// Update the snapshot generation with the latest NodeInfo generation.
@@ -272,7 +279,7 @@ func (cache *cacheImpl) UpdateSnapshot(logger klog.Logger, nodeSnapshot *Snapsho
 		updateAllLists = true
 	}
 
-	if updateAllLists || updateNodesHavePodsWithAffinity || updateNodesHavePodsWithRequiredAntiAffinity || updateUsedPVCSet {
+	if updateAllLists || updateNodesHavePodsWithAffinity || updateNodesHavePodsWithRequiredAntiAffinity {
 		cache.updateNodeInfoSnapshotList(logger, nodeSnapshot, updateAllLists)
 	}
 
@@ -318,8 +325,8 @@ func (cache *cacheImpl) updatePodGroupStateSnapshot(snapshot *Snapshot) {
 func (cache *cacheImpl) updateNodeInfoSnapshotList(logger klog.Logger, snapshot *Snapshot, updateAll bool) {
 	snapshot.havePodsWithAffinityNodeInfoList = make([]fwk.NodeInfo, 0, cache.nodeTree.numNodes)
 	snapshot.havePodsWithRequiredAntiAffinityNodeInfoList = make([]fwk.NodeInfo, 0, cache.nodeTree.numNodes)
-	snapshot.usedPVCSet = sets.New[string]()
 	if updateAll {
+		snapshot.usedPVCRefCounts = make(map[string]int)
 		// Take a snapshot of the nodes order in the tree
 		snapshot.nodeInfoList = make([]fwk.NodeInfo, 0, cache.nodeTree.numNodes)
 		nodesList, err := cache.nodeTree.list()
@@ -336,7 +343,10 @@ func (cache *cacheImpl) updateNodeInfoSnapshotList(logger klog.Logger, snapshot 
 					snapshot.havePodsWithRequiredAntiAffinityNodeInfoList = append(snapshot.havePodsWithRequiredAntiAffinityNodeInfoList, nodeInfo)
 				}
 				for key := range nodeInfo.PVCRefCounts {
-					snapshot.usedPVCSet.Insert(key)
+					snapshot.usedPVCRefCounts[key]++
+				}
+				if len(nodeInfo.PVCRefCountsDelta) > 0 {
+					nodeInfo.PVCRefCountsDelta = make(map[string]int)
 				}
 			} else {
 				utilruntime.HandleErrorWithLogger(logger, nil, "Node exists in nodeTree but not in NodeInfoMap, this should not happen", "node", klog.KRef("", nodeName))
@@ -349,9 +359,6 @@ func (cache *cacheImpl) updateNodeInfoSnapshotList(logger klog.Logger, snapshot 
 			}
 			if len(nodeInfo.GetPodsWithRequiredAntiAffinity()) > 0 {
 				snapshot.havePodsWithRequiredAntiAffinityNodeInfoList = append(snapshot.havePodsWithRequiredAntiAffinityNodeInfoList, nodeInfo)
-			}
-			for key := range nodeInfo.GetPVCRefCounts() {
-				snapshot.usedPVCSet.Insert(key)
 			}
 		}
 	}
