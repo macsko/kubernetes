@@ -34,6 +34,7 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	schedulingv1alpha3 "k8s.io/api/scheduling/v1alpha3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -127,6 +128,9 @@ type SchedulingQueue interface {
 	MoveAllToActiveOrBackoffQueue(logger klog.Logger, event fwk.ClusterEvent, oldObj, newObj interface{}, preCheck PreEnqueueCheck)
 	AssignedPodAdded(logger klog.Logger, pod *v1.Pod)
 	AssignedPodUpdated(logger klog.Logger, oldPod, newPod *v1.Pod, event fwk.ClusterEvent)
+	AddPodGroup(logger klog.Logger, podGroup *schedulingv1alpha3.PodGroup)
+	UpdatePodGroup(logger klog.Logger, podGroup *schedulingv1alpha3.PodGroup)
+	DeletePodGroup(logger klog.Logger, podGroup *schedulingv1alpha3.PodGroup)
 
 	// Close closes the SchedulingQueue so that the goroutine which is
 	// waiting to pop items can exit gracefully.
@@ -148,6 +152,8 @@ type SchedulingQueue interface {
 	UnschedulablePods() []*v1.Pod
 	// PendingPodGroupPods returns all the pending pods waiting for their pod groups.
 	PendingPodGroupPods() []*v1.Pod
+	// IncompleteEntitiesPods returns all the pods belonging to pod groups waiting for their API objects.
+	IncompleteEntitiesPods() []*v1.Pod
 }
 
 // NewSchedulingQueue initializes a priority queue as a new scheduling queue.
@@ -187,6 +193,8 @@ type PriorityQueue struct {
 	unschedulableEntities *unschedulableEntities
 	// pendingPodGroupPods stores all pending pods that wait for their corresponding pod group to be requeued.
 	pendingPodGroupPods *pendingPodGroupMemberPods
+	// incompleteEntities stores entities (pod groups) that wait for their corresponding API object (PodGroup) to be observed.
+	incompleteEntities *incompleteEntities
 
 	// preEnqueuePluginMap is keyed with profile and plugin name, valued with registered preEnqueue plugins.
 	preEnqueuePluginMap map[string]map[string]fwk.PreEnqueuePlugin
@@ -207,6 +215,10 @@ type PriorityQueue struct {
 
 	// podSigners maps a profile name to a signing function for that profile.
 	podSigners map[string]PodSigner
+
+	// podGroups is a cache of PodGroups populated by Add/Update/DeletePodGroup events.
+	// It ensures the view on the PodGroups is consistent across queueing and scheduling phases.
+	podGroups *podGroupCache
 
 	// isPopFromBackoffQEnabled indicates whether the feature gate SchedulerPopFromBackoffQ is enabled.
 	isPopFromBackoffQEnabled bool
@@ -357,6 +369,7 @@ func newQueuedPodInfoForLookup(pod *v1.Pod, plugins ...string) *framework.Queued
 }
 
 // newQueuedPodGroupInfoForLookup builds a QueuedPodGroupInfo object for a lookup in the queue.
+// TODO(CompositePodGroup): This should return a lookup PodGroup for the highest-level observed (C)PG.
 func newQueuedPodGroupInfoForLookup(pod *v1.Pod) *framework.QueuedPodGroupInfo {
 	// Since this is only used for a lookup in the queue, we only need to set the PodGroupInfo namespace and name,
 	// and so we avoid creating a full QueuedPodGroupInfo, which is expensive to instantiate frequently.
@@ -395,6 +408,7 @@ func NewPriorityQueue(
 		backoffQ:                          backoffQ,
 		unschedulableEntities:             newUnschedulableEntities(metrics.NewUnschedulablePodsRecorder(), metrics.NewGatedPodsRecorder()),
 		pendingPodGroupPods:               newPendingPodGroupMemberPods(),
+		incompleteEntities:                newIncompleteEntities(),
 		preEnqueuePluginMap:               options.preEnqueuePluginMap,
 		queueingHintMap:                   options.queueingHintMap,
 		pluginToEventsMap:                 buildEventMap(options.queueingHintMap),
@@ -413,6 +427,10 @@ func NewPriorityQueue(
 	pq.activeQ = newActiveQueue(heap.NewWithRecorder(queuedEntityKeyFunc, heap.LessFunc[framework.QueuedEntityInfo](lessConverted), metrics.NewActivePodsRecorder()), options.metricsRecorder, backoffQPopper)
 	pq.nsLister = informerFactory.Core().V1().Namespaces().Lister()
 	pq.nominator = newPodNominator(options.podLister)
+
+	if isGenericWorkloadEnabled {
+		pq.podGroups = newPodGroupCache()
+	}
 
 	return pq
 }
@@ -812,6 +830,17 @@ func (p *PriorityQueue) addPodGroupMember(logger klog.Logger, pInfo *framework.Q
 		return
 	}
 	pgInfoLookup := newQueuedPodGroupInfoForLookup(pInfo.Pod)
+	podGroup, ok := p.podGroups.getForPod(pInfo.Pod)
+	if !ok {
+		// If the PodGroup object cannot be fetched, the pod cannot be scheduled.
+		// It should be put into incompleteEntities waiting for the pod group to be observed.
+		p.incompleteEntities.add(pInfo)
+		logger.V(5).Info("Pod with pod group added to incomplete entities, waiting for its pod group object to be observed", "podGroup", klog.KObj(pgInfoLookup), "pod", klog.KObj(pInfo))
+		return
+	}
+	// TODO(CompositePodGroup): the code should check whether the root CPG exists.
+	// If not, it should add the incomplete PodGroup to the incompleteEntities.
+
 	if p.activeQ.isLastPoppedEntity(pgInfoLookup) {
 		// If the last popped entity is the matching pod group, add the pod to the pending pod group pods,
 		// so it will be added to the pod group when it's requeued.
@@ -819,7 +848,7 @@ func (p *PriorityQueue) addPodGroupMember(logger klog.Logger, pInfo *framework.Q
 		logger.V(5).Info("Pod added to pending pod group pods, waiting for its pod group to be requeued", "podGroup", klog.KObj(pgInfoLookup), "pod", klog.KObj(pInfo))
 	} else {
 		// Create a new group as it's the first member pod in the queue.
-		pgInfo := p.newQueuedPodGroupInfo(pInfo)
+		pgInfo := p.newQueuedPodGroupInfo(pInfo, podGroup)
 		if added := p.moveToActiveQ(logger, pgInfo, framework.EventUnscheduledPodAdd.Label(), false); added {
 			p.activeQ.broadcast()
 		}
@@ -848,6 +877,12 @@ func (p *PriorityQueue) deleteFromAnyQueue(entityLookup framework.QueuedEntityIn
 // It returns true if pInfo was added to an existing pod group.
 func (p *PriorityQueue) addToPodGroupIfExists(logger klog.Logger, pInfo *framework.QueuedPodInfo) bool {
 	pgInfoLookup := newQueuedPodGroupInfoForLookup(pInfo.Pod)
+
+	if p.incompleteEntities.has(podGroupKeyForPod(pInfo.Pod)) { // TODO: Replace with pg as arg?
+		p.incompleteEntities.add(pInfo)
+		logger.V(5).Info("Pod added to existing list of incomplete pods", "podGroup", klog.KObj(pgInfoLookup), "pod", klog.KObj(pInfo))
+		return true
+	}
 
 	entity, strategy := p.deleteFromAnyQueue(pgInfoLookup)
 	if entity == nil {
@@ -1108,6 +1143,18 @@ func (p *PriorityQueue) AddAttemptedPodGroupIfNeeded(logger klog.Logger, pgInfo 
 
 	rejectorPlugins := pgInfo.UnschedulablePlugins.Union(pgInfo.PendingPlugins)
 
+	podGroup, ok := p.podGroups.getForGroupInfo(pgInfo)
+	if !ok {
+		// This case shouldn't happen, because no pods should live in the pendingPodGroupPods at that moment.
+		// Handling this case gracefully, by moving the pods back to incompleteEntities.
+		for _, pInfo := range pgInfo.QueuedPodInfos {
+			p.incompleteEntities.add(pInfo)
+		}
+		logger.V(5).Info("Pod group no longer exists on requeue attempt, decomposed and moved pods to incomplete entities", "podGroup", klog.KObj(pgInfo)) // TODO: Change to error?
+		return nil
+	}
+	pgInfo.PodGroup = podGroup
+
 	// Try to requeue this pod group to activeQ or backoffQ.
 	// If the PreEnqueue fails for this pod group, it will be moved to the unschedulableEntities.
 	queue := unschedulableQ
@@ -1275,9 +1322,11 @@ func (p *PriorityQueue) Update(ctx context.Context, oldPod, newPod *v1.Pod) {
 		}
 		return
 	} else if p.isPodGroupMember(newPod) {
-		pgInfoLookup := entityLookup.(*framework.QueuedPodGroupInfo)
-		if p.pendingPodGroupPods.has(pgInfoLookup) {
-			if updated := p.pendingPodGroupPods.update(pgInfoLookup, newPod); updated {
+		if updated := p.incompleteEntities.update(newPod); updated {
+			return
+		}
+		if p.pendingPodGroupPods.has(entityLookup) {
+			if updated := p.pendingPodGroupPods.update(entityLookup, newPod); updated {
 				return
 			}
 		}
@@ -1318,16 +1367,20 @@ func (p *PriorityQueue) deletePodGroupMember(logger klog.Logger, pod *v1.Pod) {
 
 	entity, strategy := p.deleteFromAnyQueue(pgInfoLookup)
 	if entity == nil {
-		pgInfoLookup := newQueuedPodGroupInfoForLookup(pod)
 		pInfo := p.pendingPodGroupPods.delete(pgInfoLookup, pod)
 		if pInfo == nil {
-			return
+			pInfo = p.incompleteEntities.deletePod(pod)
+			if pInfo == nil {
+				return
+			}
+			logger.V(5).Info("Pod deleted from incomplete entities", "podGroup", klog.KObj(pgInfoLookup), "pod", klog.KObj(pInfo))
+		} else {
+			logger.V(5).Info("Pod deleted from pending pod group info", "podGroup", klog.KObj(pgInfoLookup), "pod", klog.KObj(pInfo))
 		}
 		// Drop metric for deleted pod.
 		for plugin := range pInfo.UnschedulablePlugins.Union(pInfo.PendingPlugins) {
 			metrics.UnschedulableReason(plugin, pInfo.Pod.Spec.SchedulerName).Dec()
 		}
-		logger.V(5).Info("Pod deleted from pending pod group info", "podGroup", klog.KObj(pgInfoLookup), "pod", klog.KObj(pInfo))
 		return
 	}
 	pgInfo := entity.(*framework.QueuedPodGroupInfo)
@@ -1375,6 +1428,85 @@ func (p *PriorityQueue) deletePod(pod *v1.Pod) {
 		// Drop metric for deleted pod.
 		decreaseUnschedulableReasonMetric(entity)
 	}
+}
+
+func (p *PriorityQueue) AddPodGroup(logger klog.Logger, podGroup *schedulingv1alpha3.PodGroup) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	p.podGroups.addOrUpdate(podGroup)
+
+	pInfos := p.incompleteEntities.delete(podGroupKey(podGroup))
+	if len(pInfos) == 0 {
+		// TODO: Verify if other cases that should be handled can happen
+		return
+	}
+	for _, pInfo := range pInfos {
+		// TODO: Check if it's the best choice to use addPodGroupMember here.
+		p.addPodGroupMember(logger, pInfo)
+	}
+	logger.V(5).Info("Pod group constructed and moved from incomplete entities to the queue", "podGroup", klog.KObj(podGroup), "podsLen", len(pInfos))
+}
+
+func (p *PriorityQueue) UpdatePodGroup(logger klog.Logger, podGroup *schedulingv1alpha3.PodGroup) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	p.podGroups.addOrUpdate(podGroup)
+
+	// TODO(CompositePodGroup): It should construct the lookup for the root (or highest-level observed) PG instead.
+	pgInfoLookup := &framework.QueuedPodGroupInfo{
+		PodGroupInfo: &framework.PodGroupInfo{
+			Namespace: podGroup.Namespace,
+			Name:      podGroup.Name,
+		},
+	}
+	p.activeQ.underRLock(func(unlockedActiveQ unlockedActiveQueueReader) {
+		entity := p.getEntityFromAnyQueue(unlockedActiveQ, pgInfoLookup)
+		if entity == nil {
+			return
+		}
+		pgInfo := entity.(*framework.QueuedPodGroupInfo)
+		pgInfo.PodGroup = podGroup
+	})
+	// TODO: Verify if other cases that should be handled can happen
+	// TODO: What to do when Update = Delete(old) + Add(new)?
+}
+
+func (p *PriorityQueue) DeletePodGroup(logger klog.Logger, podGroup *schedulingv1alpha3.PodGroup) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	p.podGroups.delete(podGroup)
+
+	// TODO(CompositePodGroup): It should construct the lookup for the root (or highest-level observed) PG instead.
+	pgInfoLookup := &framework.QueuedPodGroupInfo{
+		PodGroupInfo: &framework.PodGroupInfo{
+			Namespace: podGroup.Namespace,
+			Name:      podGroup.Name,
+		},
+	}
+	entity, _ := p.deleteFromAnyQueue(pgInfoLookup)
+	if entity == nil {
+		// Get the pending pods and move them to incompleteEntities.
+		pendingPods := p.pendingPodGroupPods.get(pgInfoLookup)
+		if len(pendingPods) == 0 {
+			// No pending pods, nothing to move.
+			return
+		}
+		p.pendingPodGroupPods.clear(pgInfoLookup)
+		for _, pInfo := range pendingPods {
+			p.incompleteEntities.add(pInfo)
+		}
+		logger.V(5).Info("Pod group deleted, decomposed and enqueued pending pods to incomplete entities", "podGroup", klog.KObj(pgInfoLookup), "pods", len(pendingPods))
+		return
+	}
+	pgInfo := entity.(*framework.QueuedPodGroupInfo)
+	for _, pInfo := range pgInfo.QueuedPodInfos {
+		p.incompleteEntities.add(pInfo)
+	}
+	logger.V(5).Info("Pod group deleted, decomposed and enqueued pods to incomplete entities", "podGroup", klog.KObj(pgInfoLookup), "pods", len(pgInfo.QueuedPodInfos))
+	// TODO: Verify if other cases that should be handled can happen
 }
 
 // AssignedPodAdded is called when a bound pod is added. Creation of this pod
@@ -1579,6 +1711,19 @@ func (p *PriorityQueue) PendingPodGroupPods() []*v1.Pod {
 	return result
 }
 
+// IncompleteEntitiesPods returns all the pending pods in incompleteEntities.
+func (p *PriorityQueue) IncompleteEntitiesPods() []*v1.Pod {
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+	var result []*v1.Pod
+	for _, pInfos := range p.incompleteEntities.podGroupToPodInfos {
+		for _, pInfo := range pInfos {
+			result = append(result, pInfo.Pod)
+		}
+	}
+	return result
+}
+
 // GetPod searches for a pod in the activeQ, backoffQ, and unschedulableEntities.
 func (p *PriorityQueue) GetPod(name, namespace string, schedulingGroup *v1.PodSchedulingGroup) (*framework.QueuedPodInfo, bool) {
 	p.lock.RLock()
@@ -1613,7 +1758,11 @@ func (p *PriorityQueue) getPod(podLookup *v1.Pod, unlockedActiveQ unlockedActive
 		if !p.isPodGroupMember(podLookup) {
 			return nil
 		}
-		return p.pendingPodGroupPods.getPod(entityLookup, podLookup)
+		pInfo := p.pendingPodGroupPods.getPod(entityLookup, podLookup)
+		if pInfo != nil {
+			return pInfo
+		}
+		return p.incompleteEntities.getPod(podLookup)
 	}
 	var foundPodInfo *framework.QueuedPodInfo
 	entity.ForEachPodInfo(func(pInfo *framework.QueuedPodInfo) bool {
@@ -1627,7 +1776,7 @@ func (p *PriorityQueue) getPod(podLookup *v1.Pod, unlockedActiveQ unlockedActive
 }
 
 var pendingPodsSummary = "activeQ:%v; backoffQ:%v; unschedulableEntities:%v"
-var pendingPodsExtendedSummary = "activeQ:%v; backoffQ:%v; unschedulableEntities:%v; pendingPodGroupMemberPods:%v"
+var pendingPodsExtendedSummary = "activeQ:%v; backoffQ:%v; unschedulableEntities:%v; pendingPodGroupMemberPods:%v; incompleteEntities:%v"
 
 // PendingPods returns all the pending pods in the queue; accompanied by a debugging string
 // recording showing the number of pods in each queue respectively.
@@ -1651,8 +1800,15 @@ func (p *PriorityQueue) PendingPods() ([]*v1.Pod, string) {
 	if !p.isGenericWorkloadEnabled {
 		return result, fmt.Sprintf(pendingPodsSummary, activeQLen, backoffQLen, unschedulablePodsLen)
 	}
+	incompleteEntitiesPodsLen := 0
+	for _, pInfos := range p.incompleteEntities.podGroupToPodInfos {
+		for _, pInfo := range pInfos {
+			result = append(result, pInfo.Pod)
+			incompleteEntitiesPodsLen++
+		}
+	}
 	pendingPodGroupPodsLen := p.pendingPodGroupPods.len()
-	return result, fmt.Sprintf(pendingPodsExtendedSummary, activeQLen, backoffQLen, unschedulablePodsLen, pendingPodGroupPodsLen)
+	return result, fmt.Sprintf(pendingPodsExtendedSummary, activeQLen, backoffQLen, unschedulablePodsLen, pendingPodGroupPodsLen, incompleteEntitiesPodsLen)
 }
 
 // PatchPodStatus handles the pod status update by sending an update API call through API dispatcher.
@@ -1767,12 +1923,13 @@ func (p *PriorityQueue) newQueuedPodInfo(ctx context.Context, pod *v1.Pod, plugi
 }
 
 // newQueuedPodGroupInfo builds a QueuedPodGroupInfo object.
-func (p *PriorityQueue) newQueuedPodGroupInfo(podInfo *framework.QueuedPodInfo) *framework.QueuedPodGroupInfo {
+func (p *PriorityQueue) newQueuedPodGroupInfo(podInfo *framework.QueuedPodInfo, podGroup *schedulingv1alpha3.PodGroup) *framework.QueuedPodGroupInfo {
 	return &framework.QueuedPodGroupInfo{
 		PodGroupInfo: &framework.PodGroupInfo{
 			Namespace:       podInfo.Pod.Namespace,
 			Name:            *podInfo.Pod.Spec.SchedulingGroup.PodGroupName,
 			UnscheduledPods: []*v1.Pod{podInfo.Pod},
+			PodGroup:        podGroup,
 		},
 		QueuedPodInfos: []*framework.QueuedPodInfo{podInfo},
 		QueueingParams: framework.QueueingParams{

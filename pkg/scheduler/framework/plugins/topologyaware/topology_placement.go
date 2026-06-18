@@ -59,10 +59,7 @@ func (pl *TopologyPlacement) Name() string {
 // GeneratePlacements generates placements for a pod group based on the topology constraints in the pod group spec.
 // It uses the parent placement to find the nodes that are available for placement.
 func (pl *TopologyPlacement) GeneratePlacements(ctx context.Context, state fwk.PodGroupCycleState, podGroup fwk.PodGroupInfo, parentPlacement *fwk.Placement) (*fwk.GeneratePlacementsResult, *fwk.Status) {
-	podGroupResource, err := pl.podGroupLister.PodGroups(podGroup.GetNamespace()).Get(podGroup.GetName())
-	if err != nil {
-		return nil, fwk.AsStatus(err)
-	}
+	podGroupResource := podGroup.GetPodGroup()
 	topologyKey, ok := pl.getTopologyKey(podGroupResource)
 	if !ok {
 		// No topology constraints, return a single placement with no constraints.

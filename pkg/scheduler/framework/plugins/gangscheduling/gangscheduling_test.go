@@ -621,10 +621,11 @@ func TestPlacementFeasible(t *testing.T) {
 			// Inject the mock lister
 			pl.snapshotLister = mockLister
 
-			pgInfo := &testPodGroupInfo{
-				namespace:       namespace,
-				name:            pgName,
-				unscheduledPods: tc.unscheduledPods,
+			pgInfo := &schedulerframework.PodGroupInfo{
+				Namespace:       namespace,
+				Name:            pgName,
+				UnscheduledPods: tc.unscheduledPods,
+				PodGroup:        pg,
 			}
 
 			cycleState := schedulerframework.NewCycleState()
@@ -643,13 +644,3 @@ func TestPlacementFeasible(t *testing.T) {
 		})
 	}
 }
-
-type testPodGroupInfo struct {
-	namespace       string
-	name            string
-	unscheduledPods []*v1.Pod
-}
-
-func (t *testPodGroupInfo) GetNamespace() string          { return t.namespace }
-func (t *testPodGroupInfo) GetName() string               { return t.name }
-func (t *testPodGroupInfo) GetUnscheduledPods() []*v1.Pod { return t.unscheduledPods }

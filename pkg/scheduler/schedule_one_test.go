@@ -1154,6 +1154,12 @@ func TestSchedulerScheduleOne(t *testing.T) {
 			podGroupLister:                         podGroupLister,
 			nominatedNodeNameForExpectationEnabled: features.nominatedNodeNameForExpectationEnabled,
 		}
+		if scheduleAsPodGroup {
+			testPG := &schedulingv1alpha3.PodGroup{
+				ObjectMeta: metav1.ObjectMeta{Name: "pg", Namespace: item.sendPod.Namespace},
+			}
+			queue.AddPodGroup(logger, testPG)
+		}
 		queue.Add(ctx, item.sendPod)
 
 		sched.SchedulePod = func(ctx context.Context, fwk framework.Framework, state fwk.CycleState, podInfo *framework.QueuedPodInfo) (ScheduleResult, error) {
