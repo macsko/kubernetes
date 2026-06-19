@@ -1154,6 +1154,9 @@ func TestSchedulerScheduleOne(t *testing.T) {
 			podGroupLister:                         podGroupLister,
 			nominatedNodeNameForExpectationEnabled: features.nominatedNodeNameForExpectationEnabled,
 		}
+		informerFactory.Start(ctx.Done())
+		informerFactory.WaitForCacheSync(ctx.Done())
+
 		if scheduleAsPodGroup {
 			testPG := &schedulingv1alpha3.PodGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "pg", Namespace: item.sendPod.Namespace},
@@ -1183,8 +1186,6 @@ func TestSchedulerScheduleOne(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		informerFactory.Start(ctx.Done())
-		informerFactory.WaitForCacheSync(ctx.Done())
 		sched.nodeInfoSnapshot = internalcache.NewEmptySnapshot()
 		sched.ScheduleOne(ctx)
 

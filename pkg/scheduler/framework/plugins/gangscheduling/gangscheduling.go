@@ -171,11 +171,11 @@ func (pl *GangScheduling) Permit(ctx context.Context, state fwk.CycleState, pod 
 	namespace := pod.Namespace
 	schedulingGroup := pod.Spec.SchedulingGroup
 
-	podGroup, err := pl.podGroupLister.PodGroups(namespace).Get(*schedulingGroup.PodGroupName)
+	podGroup, err := pl.snapshotLister.PodGroups().Get(namespace, *schedulingGroup.PodGroupName)
 	if err != nil {
 		// It's likely that the pod group was removed or another error happened.
 		// Returning error to retry the Pod when the pod group is added again.
-		return fwk.AsStatus(fmt.Errorf("failed to get podGroup %s/%s: %w", namespace, *schedulingGroup.PodGroupName, err)), 0
+		return fwk.AsStatus(fmt.Errorf("failed to get podGroup %s/%s from snapshot: %w", namespace, *schedulingGroup.PodGroupName, err)), 0
 	}
 
 	policy := podGroup.Spec.SchedulingPolicy

@@ -424,6 +424,7 @@ func New(ctx context.Context,
 		internalqueue.WithMetricsRecorder(metricsRecorder),
 		internalqueue.WithAPIDispatcher(apiDispatcher),
 		internalqueue.WithPodSigners(podSigners),
+		internalqueue.WithPodGroupLister(schedulerCache),
 	)
 
 	var apiCache fwk.APICacher

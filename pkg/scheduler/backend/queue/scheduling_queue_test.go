@@ -3882,8 +3882,6 @@ func TestAddAttemptedPodGroupIfNeeded(t *testing.T) {
 			if test.disableBackoff {
 				opts = append(opts, WithPodInitialBackoffDuration(0), WithPodMaxBackoffDuration(0))
 			}
-			q := NewTestQueue(tCtx, newDefaultQueueSort(), opts...)
-
 			pg := &schedulingv1alpha3.PodGroup{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      pgName,
@@ -3891,7 +3889,7 @@ func TestAddAttemptedPodGroupIfNeeded(t *testing.T) {
 					UID:       "pg-uid",
 				},
 			}
-			q.podGroups.addOrUpdate(pg)
+			q := NewTestQueueWithObjects(tCtx, newDefaultQueueSort(), []runtime.Object{pg}, opts...)
 			pgInfo := q.newQueuedPodGroupInfo(q.newQueuedPodInfo(tCtx, pod1), pg)
 
 			test.setup(tCtx, q, pgInfo)
