@@ -48,23 +48,18 @@ func (sched *Scheduler) scheduleOnePodGroup(ctx context.Context, podGroupInfo *f
 	logger = klog.LoggerWithValues(logger, "podGroup", klog.KObj(podGroupInfo))
 	ctx = klog.NewContext(ctx, logger)
 
+	podGroup, err := sched.Cache.PodGroups().Get(podGroupInfo.Namespace, podGroupInfo.Name)
+	if err != nil {
+		// It can happen that the pod group was popped from the scheduling queue before it observed the PodGroup deletion.
+		// PodGroup should come back to the scheduling queue.
+		sched.handlePodGroupFailureBeforeScheduling(ctx, podGroupInfo, err)
+		return
+	}
+	podGroupInfo.PodGroup = podGroup
+
 	schedFwk, err := sched.frameworkForPodGroup(podGroupInfo)
 	if err != nil {
-		for _, podInfo := range podGroupInfo.QueuedPodInfos {
-			podFwk, podFwkErr := sched.frameworkForPod(podInfo.Pod)
-			if podFwkErr != nil {
-				// This shouldn't happen, because we only accept for scheduling the pods
-				// which specify a scheduler name that matches one of the profiles.
-				logger.Error(podFwkErr, "Error occurred")
-				sched.SchedulingQueue.Done(podInfo.Pod.UID)
-				return
-			}
-			sched.FailureHandler(ctx, podFwk, podInfo, fwk.AsStatus(err), clearNominatedNode, time.Now())
-		}
-		err := sched.SchedulingQueue.AddAttemptedPodGroupIfNeeded(logger, podGroupInfo, sched.SchedulingQueue.SchedulingCycle())
-		if err != nil {
-			utilruntime.HandleErrorWithContext(ctx, err, "Failed to pod group back to scheduling queue", "podGroup", klog.KObj(podGroupInfo))
-		}
+		sched.handlePodGroupFailureBeforeScheduling(ctx, podGroupInfo, err)
 		return
 	}
 	sched.skipPodGroupPodSchedule(ctx, schedFwk, podGroupInfo)
@@ -78,6 +73,27 @@ func (sched *Scheduler) scheduleOnePodGroup(ctx context.Context, podGroupInfo *f
 	logger.V(3).Info("Attempting to schedule pod group", "podGroup", klog.KObj(podGroupInfo))
 
 	sched.podGroupCycle(ctx, schedFwk, framework.NewCycleState(), podGroupInfo)
+}
+
+// handlePodGroupFailureBeforeScheduling handles the failure of a pod group that occurred before scheduling.
+func (sched *Scheduler) handlePodGroupFailureBeforeScheduling(ctx context.Context, podGroupInfo *framework.QueuedPodGroupInfo, err error) {
+	logger := klog.FromContext(ctx)
+
+	for _, podInfo := range podGroupInfo.QueuedPodInfos {
+		podFwk, podFwkErr := sched.frameworkForPod(podInfo.Pod)
+		if podFwkErr != nil {
+			// This shouldn't happen, because we only accept for scheduling the pods
+			// which specify a scheduler name that matches one of the profiles.
+			logger.Error(podFwkErr, "Error occurred")
+			sched.SchedulingQueue.Done(podInfo.Pod.UID)
+			continue
+		}
+		sched.FailureHandler(ctx, podFwk, podInfo, fwk.AsStatus(err), clearNominatedNode, time.Now())
+	}
+	err = sched.SchedulingQueue.AddAttemptedPodGroupIfNeeded(logger, podGroupInfo, sched.SchedulingQueue.SchedulingCycle())
+	if err != nil {
+		utilruntime.HandleErrorWithContext(ctx, err, "Failed to add pod group back to scheduling queue", "podGroup", klog.KObj(podGroupInfo))
+	}
 }
 
 // frameworkForPodGroup obtains the concrete scheduler framework for the entire pod group.
@@ -226,10 +242,7 @@ func (sched *Scheduler) runWorkloadAwarePreemption(ctx context.Context, schedFwk
 		return nil, fwk.NewStatus(fwk.Unschedulable, "default preemption plugin is not registered, workload aware preemption is disabled")
 	}
 
-	pg, err := sched.Cache.PodGroups().Get(podGroupInfo.Namespace, podGroupInfo.Name)
-	if err != nil {
-		return nil, fwk.AsStatus(fmt.Errorf("failed to get pod group object: %w", err))
-	}
+	pg := podGroupInfo.GetPodGroup()
 	if pg.Spec.SchedulingConstraints != nil && len(pg.Spec.SchedulingConstraints.Topology) > 0 {
 		return nil, fwk.NewStatus(fwk.Unschedulable, "workload aware preemption is not supported for pod groups with scheduling constraints")
 	}
@@ -607,12 +620,7 @@ func (sched *Scheduler) updatePodGroupCondition(ctx context.Context,
 
 	// If the PodGroup was already successfully scheduled, don't regress the
 	// condition back to False on a subsequent cycle for extra pods.
-	pg, err := sched.Cache.PodGroups().Get(podGroupInfo.Namespace, podGroupInfo.Name)
-	if err != nil {
-		utilruntime.HandleErrorWithLogger(logger, err, "Failed to get PodGroup for status update", "podGroup", klog.KObj(podGroupInfo))
-		return
-	}
-
+	pg := podGroupInfo.PodGroup
 	existing := apimeta.FindStatusCondition(pg.Status.Conditions, condition.Type)
 	if existing != nil && existing.Status == metav1.ConditionTrue && condition.Status != metav1.ConditionTrue {
 		return

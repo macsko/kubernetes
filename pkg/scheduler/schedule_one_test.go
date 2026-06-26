@@ -1138,7 +1138,7 @@ func TestSchedulerScheduleOne(t *testing.T) {
 		}
 
 		ar := metrics.NewMetricsAsyncRecorder(10, 1*time.Second, ctx.Done())
-		queue := internalqueue.NewSchedulingQueue(nil, informerFactory, internalqueue.WithMetricsRecorder(ar), internalqueue.WithAPIDispatcher(apiDispatcher), internalqueue.WithPodGroupLister(cache.PodGroups()))
+		queue := internalqueue.NewSchedulingQueue(nil, informerFactory, internalqueue.WithMetricsRecorder(ar), internalqueue.WithAPIDispatcher(apiDispatcher))
 		if features.asyncAPICallsEnabled {
 			schedFramework.SetAPICacher(apicache.New(queue, cache))
 		}
@@ -1160,7 +1160,6 @@ func TestSchedulerScheduleOne(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "pg", Namespace: item.sendPod.Namespace},
 			}
 			cache.AddPodGroup(testPG)
-			queue.AddPodGroup(logger, testPG)
 		}
 		queue.Add(ctx, item.sendPod)
 

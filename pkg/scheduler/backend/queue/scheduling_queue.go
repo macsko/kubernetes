@@ -34,6 +34,7 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	schedulingv1alpha3 "k8s.io/api/scheduling/v1alpha3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -204,6 +205,8 @@ type PriorityQueue struct {
 	// podSigners maps a profile name to a signing function for that profile.
 	podSigners map[string]PodSigner
 
+	podGroupLister fwk.PodGroupLister
+
 	// isPopFromBackoffQEnabled indicates whether the feature gate SchedulerPopFromBackoffQ is enabled.
 	isPopFromBackoffQEnabled bool
 	// isGenericWorkloadEnabled indicates whether the feature gate GenericWorkload is enabled.
@@ -239,6 +242,7 @@ type priorityQueueOptions struct {
 	queueingHintMap                   QueueingHintMapPerProfile
 	apiDispatcher                     fwk.APIDispatcher
 	podSigners                        map[string]PodSigner
+	podGroupLister                    fwk.PodGroupLister
 }
 
 // Option configures a PriorityQueue
@@ -330,6 +334,13 @@ func WithPodSigners(signers map[string]PodSigner) Option {
 	}
 }
 
+// WithPodGroupLister sets pod group lister for PriorityQueue.
+func WithPodGroupLister(pl fwk.PodGroupLister) Option {
+	return func(o *priorityQueueOptions) {
+		o.podGroupLister = pl
+	}
+}
+
 var defaultPriorityQueueOptions = priorityQueueOptions{
 	clock:                             clock.RealClock{},
 	podInitialBackoffDuration:         DefaultPodInitialBackoffDuration,
@@ -398,6 +409,7 @@ func NewPriorityQueue(
 		pluginMetricsSamplePercent:        options.pluginMetricsSamplePercent,
 		apiDispatcher:                     options.apiDispatcher,
 		podSigners:                        options.podSigners,
+		podGroupLister:                    options.podGroupLister,
 		isPopFromBackoffQEnabled:          isPopFromBackoffQEnabled,
 		isGenericWorkloadEnabled:          isGenericWorkloadEnabled,
 		isOpportunisticBatchingEnabled:    isOpportunisticBatchingEnabled,
@@ -815,7 +827,11 @@ func (p *PriorityQueue) addPodGroupMember(logger klog.Logger, pInfo *framework.Q
 		logger.V(5).Info("Pod added to pending pod group pods, waiting for its pod group to be requeued", "podGroup", klog.KObj(pgInfoLookup), "pod", klog.KObj(pInfo))
 	} else {
 		// Create a new group as it's the first member pod in the queue.
-		pgInfo := p.newQueuedPodGroupInfo(pInfo)
+		var podGroup *schedulingv1alpha3.PodGroup
+		if p.podGroupLister != nil {
+			podGroup, _ = p.podGroupLister.Get(pInfo.Pod.Namespace, *pInfo.Pod.Spec.SchedulingGroup.PodGroupName)
+		}
+		pgInfo := p.newQueuedPodGroupInfo(pInfo, podGroup)
 		if added := p.moveToActiveQ(logger, pgInfo, framework.EventUnscheduledPodAdd.Label(), false); added {
 			p.activeQ.broadcast()
 		}
@@ -1056,6 +1072,10 @@ func (p *PriorityQueue) addUnschedulablePodGroupMember(logger klog.Logger, pInfo
 func (p *PriorityQueue) AddAttemptedPodGroupIfNeeded(logger klog.Logger, pgInfo *framework.QueuedPodGroupInfo, schedulingCycle int64) error {
 	p.lock.Lock()
 	defer p.lock.Unlock()
+
+	if p.podGroupLister != nil {
+		pgInfo.PodGroup, _ = p.podGroupLister.Get(pgInfo.GetNamespace(), pgInfo.GetName())
+	}
 
 	if p.unschedulableEntities.get(pgInfo) != nil {
 		return fmt.Errorf("pod group %v is already present in unschedulable queue", klog.KObj(pgInfo))
@@ -1713,12 +1733,13 @@ func (p *PriorityQueue) newQueuedPodInfo(ctx context.Context, pod *v1.Pod, plugi
 }
 
 // newQueuedPodGroupInfo builds a QueuedPodGroupInfo object.
-func (p *PriorityQueue) newQueuedPodGroupInfo(podInfo *framework.QueuedPodInfo) *framework.QueuedPodGroupInfo {
+func (p *PriorityQueue) newQueuedPodGroupInfo(podInfo *framework.QueuedPodInfo, podGroup *schedulingv1alpha3.PodGroup) *framework.QueuedPodGroupInfo {
 	return &framework.QueuedPodGroupInfo{
 		PodGroupInfo: &framework.PodGroupInfo{
 			Namespace:       podInfo.Pod.Namespace,
 			Name:            *podInfo.Pod.Spec.SchedulingGroup.PodGroupName,
 			UnscheduledPods: []*v1.Pod{podInfo.Pod},
+			PodGroup:        podGroup,
 		},
 		QueuedPodInfos: []*framework.QueuedPodInfo{podInfo},
 		QueueingParams: framework.QueueingParams{
