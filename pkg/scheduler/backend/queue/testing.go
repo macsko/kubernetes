@@ -20,12 +20,31 @@ import (
 	"context"
 	"time"
 
+	schedulingv1alpha3 "k8s.io/api/scheduling/v1alpha3"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	fwk "k8s.io/kube-scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/metrics"
 )
+
+type fakePodGroupLister struct {
+	podGroups map[string]*schedulingv1alpha3.PodGroup
+}
+
+func newFakePodGroupLister(podGroups ...*schedulingv1alpha3.PodGroup) fwk.PodGroupLister {
+	f := &fakePodGroupLister{
+		podGroups: make(map[string]*schedulingv1alpha3.PodGroup),
+	}
+	for _, pg := range podGroups {
+		f.podGroups[pg.Namespace+"/"+pg.Name] = pg
+	}
+	return f
+}
+
+func (f fakePodGroupLister) Get(namespace, name string) (*schedulingv1alpha3.PodGroup, error) {
+	return f.podGroups[namespace+"/"+name], nil
+}
 
 // NewTestQueue creates a priority queue with an empty informer factory.
 func NewTestQueue(ctx context.Context, lessFn fwk.LessFunc, opts ...Option) *PriorityQueue {
@@ -47,7 +66,8 @@ func NewTestQueueWithObjects(
 	recorder := metrics.NewMetricsAsyncRecorder(10, 20*time.Microsecond, ctx.Done())
 	// We set it before the options that users provide, so that users can override it.
 	opts = append([]Option{WithMetricsRecorder(recorder)}, opts...)
-	return NewTestQueueWithInformerFactory(ctx, lessFn, informerFactory, opts...)
+	pq := NewTestQueueWithInformerFactory(ctx, lessFn, informerFactory, opts...)
+	return pq
 }
 
 func NewTestQueueWithInformerFactory(

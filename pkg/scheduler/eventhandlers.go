@@ -448,6 +448,7 @@ func (sched *Scheduler) addPodGroup(obj any) {
 
 	logger.V(3).Info("Add event for pod group", "podGroup", klog.KObj(pg))
 	sched.Cache.AddPodGroup(pg)
+	sched.SchedulingQueue.AddPodGroup(logger, pg)
 	sched.SchedulingQueue.MoveAllToActiveOrBackoffQueue(logger, evt, nil, pg, nil)
 }
 
@@ -472,6 +473,7 @@ func (sched *Scheduler) updatePodGroup(oldObj, newObj any) {
 
 	logger.V(4).Info("Update event for pod group", "podGroup", klog.KObj(newPG))
 	sched.Cache.UpdatePodGroup(oldPG, newPG)
+	sched.SchedulingQueue.UpdatePodGroup(logger, newPG)
 	sched.SchedulingQueue.MoveAllToActiveOrBackoffQueue(logger, evt, oldPG, newPG, nil)
 }
 
@@ -498,9 +500,9 @@ func (sched *Scheduler) deletePodGroup(obj any) {
 
 	logger.V(3).Info("Delete event for pod group", "podGroup", klog.KObj(pg))
 	sched.Cache.RemovePodGroup(pg)
+	sched.SchedulingQueue.DeletePodGroup(logger, pg)
 	sched.SchedulingQueue.MoveAllToActiveOrBackoffQueue(logger, evt, pg, nil, nil)
 }
-
 
 const (
 	// syncedPollPeriod controls how often you look at the status of your sync funcs
@@ -558,6 +560,17 @@ func addAllEventHandlers(
 		return err
 	}
 	handlers = append(handlers, handlerRegistration)
+
+	if utilfeature.DefaultFeatureGate.Enabled(features.GenericWorkload) {
+		if handlerRegistration, err = informerFactory.Scheduling().V1alpha3().PodGroups().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    sched.addPodGroup,
+			UpdateFunc: sched.updatePodGroup,
+			DeleteFunc: sched.deletePodGroup,
+		}); err != nil {
+			return err
+		}
+		handlers = append(handlers, handlerRegistration)
+	}
 
 	buildEvtResHandler := func(at fwk.ActionType, resource fwk.EventResource) cache.ResourceEventHandlerFuncs {
 		funcs := cache.ResourceEventHandlerFuncs{}
@@ -692,16 +705,7 @@ func addAllEventHandlers(
 			}
 			handlers = append(handlers, handlerRegistration)
 		case fwk.PodGroup:
-			if utilfeature.DefaultFeatureGate.Enabled(features.GenericWorkload) {
-				if handlerRegistration, err = informerFactory.Scheduling().V1alpha3().PodGroups().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-					AddFunc:    sched.addPodGroup,
-					UpdateFunc: sched.updatePodGroup,
-					DeleteFunc: sched.deletePodGroup,
-				}); err != nil {
-					return err
-				}
-				handlers = append(handlers, handlerRegistration)
-			}
+			// Do nothing. Registered explicitly.
 		default:
 			// Tests may not instantiate dynInformerFactory.
 			if dynInformerFactory == nil {

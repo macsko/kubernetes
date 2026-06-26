@@ -136,6 +136,8 @@ type Step struct {
 	CreatePodGroup *schedulingapi.PodGroup
 	// UpdatePodGroup is used to update an existing pod group and wait for it to propagate.
 	UpdatePodGroup *schedulingapi.PodGroup
+	// DeletePodGroup is used to delete a pod group by name and wait for it to propagate.
+	DeletePodGroup string
 	// CreatePods is use to create pods in the cluster.
 	CreatePods []*v1.Pod
 	// CreateWorkloads is use to create workloads in the cluster.
@@ -148,6 +150,8 @@ type Step struct {
 	WaitForPodsInActiveQ []string
 	// WaitForPodsInUnschedulableEntities is use to wait for pods to be in unschedulableEntities.
 	WaitForPodsInUnschedulableEntities []string
+	// WaitForPodsInIncompleteEntities is use to wait for pods to be in incompleteEntities.
+	WaitForPodsInIncompleteEntities []string
 	// WaitForPodsUnschedulable is use to wait for pods to be unschedulable.
 	WaitForPodsUnschedulable []string
 	// WaitForPodsScheduled is use to wait for pods to be scheduled.
@@ -173,6 +177,16 @@ type Step struct {
 func podInUnschedulableEntities(queue queue.SchedulingQueue, podName string) bool {
 	unschedPods := queue.UnschedulablePods()
 	for _, pod := range unschedPods {
+		if pod.Name == podName {
+			return true
+		}
+	}
+	return false
+}
+
+func podInIncompleteEntities(queue queue.SchedulingQueue, podName string) bool {
+	incompletePods := queue.IncompleteEntitiesPods()
+	for _, pod := range incompletePods {
 		if pod.Name == podName {
 			return true
 		}
@@ -288,6 +302,37 @@ func updatePodGroup(testCtx *testutils.TestContext, ns string, pg *schedulingapi
 	return nil
 }
 
+func deletePodGroup(testCtx *testutils.TestContext, ns string, pgName string) error {
+	cs := testCtx.ClientSet
+
+	pg, err := cs.SchedulingV1alpha3().PodGroups(ns).Get(testCtx.Ctx, pgName, metav1.GetOptions{})
+	if err == nil && len(pg.Finalizers) > 0 {
+		pg.Finalizers = nil
+		if _, err = cs.SchedulingV1alpha3().PodGroups(ns).Update(testCtx.Ctx, pg, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("failed to clear finalizers of pod group %s: %w", pgName, err)
+		}
+	}
+	if err := cs.SchedulingV1alpha3().PodGroups(ns).Delete(testCtx.Ctx, pgName, metav1.DeleteOptions{}); err != nil {
+		return fmt.Errorf("failed to delete pod group %s: %w", pgName, err)
+	}
+	err = wait.PollUntilContextTimeout(testCtx.Ctx, 100*time.Millisecond, wait.ForeverTestTimeout, false,
+		func(_ context.Context) (bool, error) {
+			_, err := testCtx.InformerFactory.Scheduling().V1alpha3().PodGroups().Lister().PodGroups(ns).Get(pgName)
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					return true, nil
+				}
+				return false, err
+			}
+			return false, nil
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to wait for pod group %s deletion to propagate: %w", pgName, err)
+	}
+	return nil
+}
+
 func createWorkloads(testCtx *testutils.TestContext, ns string, wls []*schedulingapi.Workload) error {
 	cs := testCtx.ClientSet
 	for _, wl := range wls {
@@ -350,6 +395,20 @@ func waitForPodsInUnschedulableEntities(testCtx *testutils.TestContext, ns strin
 		)
 		if err != nil {
 			return fmt.Errorf("failed to wait for pod %s to be in unschedulable entities: %w", podName, err)
+		}
+	}
+	return nil
+}
+
+func waitForPodsInIncompleteEntities(testCtx *testutils.TestContext, ns string, podNames []string) error {
+	for _, podName := range podNames {
+		err := wait.PollUntilContextTimeout(testCtx.Ctx, 100*time.Millisecond, wait.ForeverTestTimeout, false,
+			func(_ context.Context) (bool, error) {
+				return podInIncompleteEntities(testCtx.Scheduler.SchedulingQueue, podName), nil
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("failed to wait for pod %s to be in incomplete entities: %w", podName, err)
 		}
 	}
 	return nil
@@ -516,6 +575,8 @@ func RunSteps(testCtx *testutils.TestContext, t *testing.T, ns string, steps []S
 			err = createPodGroup(testCtx, ns, step.CreatePodGroup)
 		case step.UpdatePodGroup != nil:
 			err = updatePodGroup(testCtx, ns, step.UpdatePodGroup)
+		case step.DeletePodGroup != "":
+			err = deletePodGroup(testCtx, ns, step.DeletePodGroup)
 		case step.CreateWorkloads != nil:
 			err = createWorkloads(testCtx, ns, step.CreateWorkloads)
 		case step.DeletePods != nil:
@@ -526,6 +587,8 @@ func RunSteps(testCtx *testutils.TestContext, t *testing.T, ns string, steps []S
 			err = waitForPodsInActiveQ(testCtx, step.WaitForPodsInActiveQ)
 		case step.WaitForPodsInUnschedulableEntities != nil:
 			err = waitForPodsInUnschedulableEntities(testCtx, ns, step.WaitForPodsInUnschedulableEntities)
+		case step.WaitForPodsInIncompleteEntities != nil:
+			err = waitForPodsInIncompleteEntities(testCtx, ns, step.WaitForPodsInIncompleteEntities)
 		case step.WaitForPodsUnschedulable != nil:
 			err = waitForPodsUnschedulable(testCtx, ns, step.WaitForPodsUnschedulable)
 		case step.WaitForPodsScheduled != nil:

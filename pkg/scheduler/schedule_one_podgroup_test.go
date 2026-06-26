@@ -3027,4 +3027,79 @@ func TestPodGroupCycle_NominatedNodes(t *testing.T) {
 	}
 }
 
+func TestScheduleOnePodGroup_PodGroupNotFound(t *testing.T) {
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.GenericWorkload, true)
 
+	p1 := st.MakePod().Name("p1").Namespace("default").UID("p1").PodGroupName("pg").SchedulerName("test-scheduler").Obj()
+	p2 := st.MakePod().Name("p2").Namespace("default").UID("p2").PodGroupName("pg").SchedulerName("test-scheduler").Obj()
+	qInfo1 := &framework.QueuedPodInfo{PodInfo: &framework.PodInfo{Pod: p1}}
+	qInfo2 := &framework.QueuedPodInfo{PodInfo: &framework.PodInfo{Pod: p2}}
+
+	podGroupInfo := &framework.QueuedPodGroupInfo{
+		QueuedPodInfos: []*framework.QueuedPodInfo{qInfo1, qInfo2},
+		PodGroupInfo: &framework.PodGroupInfo{
+			Name:            "pg",
+			Namespace:       "default",
+			UnscheduledPods: []*v1.Pod{p1, p2},
+		},
+	}
+
+	_, ctx := ktesting.NewTestContext(t)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	registry := frameworkruntime.Registry{
+		queuesort.Name:     queuesort.New,
+		defaultbinder.Name: defaultbinder.New,
+	}
+	profileCfg := config.KubeSchedulerProfile{
+		SchedulerName: "test-scheduler",
+		Plugins: &config.Plugins{
+			QueueSort: config.PluginSet{
+				Enabled: []config.Plugin{{Name: queuesort.Name}},
+			},
+			Bind: config.PluginSet{
+				Enabled: []config.Plugin{{Name: defaultbinder.Name}},
+			},
+		},
+	}
+
+	client := clientsetfake.NewSimpleClientset(p1, p2)
+	informerFactory := informers.NewSharedInformerFactory(client, 0)
+
+	schedFwk, err := frameworkruntime.NewFramework(ctx, registry, &profileCfg,
+		frameworkruntime.WithInformerFactory(informerFactory),
+		frameworkruntime.WithEventRecorder(events.NewFakeRecorder(100)),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create new framework: %v", err)
+	}
+
+	cache := internalcache.New(ctx, nil, true)
+	queue := internalqueue.NewSchedulingQueue(nil, informerFactory, internalqueue.WithPodGroupLister(cache.PodGroups()))
+
+	informerFactory.Start(ctx.Done())
+	informerFactory.WaitForCacheSync(ctx.Done())
+
+	sched := &Scheduler{
+		Profiles:               profile.Map{"test-scheduler": schedFwk},
+		SchedulingQueue:        queue,
+		Cache:                  cache,
+		client:                 client,
+		genericWorkloadEnabled: true,
+	}
+	sched.FailureHandler = sched.handleSchedulingFailure
+
+	sched.scheduleOnePodGroup(ctx, podGroupInfo)
+
+	// Verify that the pods are put back into the scheduling queue's incompleteEntities.
+	incompletePods := queue.IncompleteEntitiesPods()
+	gotIncompletePods := sets.New[string]()
+	for _, pod := range incompletePods {
+		gotIncompletePods.Insert(pod.Name)
+	}
+	expectedPods := sets.New("p1", "p2")
+	if diff := cmp.Diff(expectedPods, gotIncompletePods); diff != "" {
+		t.Errorf("Unexpected pods in incompleteEntities (-want,+got)\n%s", diff)
+	}
+}
