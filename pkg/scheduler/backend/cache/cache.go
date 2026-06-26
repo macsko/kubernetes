@@ -20,10 +20,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	schedulingv1alpha3 "k8s.io/api/scheduling/v1alpha3"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -76,6 +78,8 @@ type cacheImpl struct {
 	imageStates map[string]*fwk.ImageStateSummary
 	// podGroupStates stores the runtime state for each known pod group (only if GenericWorkload feature gate is enabled).
 	podGroupStates map[podGroupKey]*podGroupState
+	// podGroups stores the cached API objects of PodGroups (only if GenericWorkload feature gate is enabled).
+	podGroups map[podGroupKey]*schedulingv1alpha3.PodGroup
 	// genericWorkloadEnabled stores the GenericWorkload feature gate value.
 	genericWorkloadEnabled bool
 	// apiDispatcher is used for the methods that are expected to send API calls.
@@ -88,6 +92,8 @@ type cacheImpl struct {
 	// deltas from events handlers while within the scheduler cycle, we only apply and reset the delta to
 	// avoid global re-calculation.
 	pvcRefCountsDelta map[string]int
+
+	podGroupLister podGroupLister
 }
 
 type podState struct {
@@ -96,7 +102,7 @@ type podState struct {
 
 func newCache(ctx context.Context, period time.Duration, apiDispatcher fwk.APIDispatcher, genericWorkloadEnabled bool) *cacheImpl {
 	logger := klog.FromContext(ctx)
-	return &cacheImpl{
+	cache := &cacheImpl{
 		period: period,
 		stop:   ctx.Done(),
 
@@ -106,10 +112,13 @@ func newCache(ctx context.Context, period time.Duration, apiDispatcher fwk.APIDi
 		podStates:              make(map[string]*podState),
 		imageStates:            make(map[string]*fwk.ImageStateSummary),
 		podGroupStates:         make(map[podGroupKey]*podGroupState),
+		podGroups:              make(map[podGroupKey]*schedulingv1alpha3.PodGroup),
 		genericWorkloadEnabled: genericWorkloadEnabled,
 		apiDispatcher:          apiDispatcher,
 		pvcRefCountsDelta:      make(map[string]int),
 	}
+	cache.podGroupLister = podGroupLister{cache: cache}
+	return cache
 }
 
 // newNodeInfoListItem initializes a new nodeInfoListItem.
@@ -291,8 +300,10 @@ func (cache *cacheImpl) UpdateSnapshot(logger klog.Logger, nodeSnapshot *Snapsho
 		return errors.New(errMsg)
 	}
 
-	// Take a snapshot of pod group states for this scheduling cycle.
-	cache.updatePodGroupStateSnapshot(nodeSnapshot)
+	if cache.genericWorkloadEnabled {
+		// Take a snapshot of pod group states for this scheduling cycle.
+		cache.updatePodGroupStateSnapshot(nodeSnapshot)
+	}
 
 	return nil
 }
@@ -315,6 +326,8 @@ func (cache *cacheImpl) updatePodGroupStateSnapshot(snapshot *Snapshot) {
 		}
 		snapshot.podGroupStates[key] = podGroupState.snapshot()
 	}
+	snapshot.podGroups = make(map[podGroupKey]*schedulingv1alpha3.PodGroup, len(cache.podGroups))
+	maps.Copy(snapshot.podGroups, cache.podGroups)
 }
 
 func (cache *cacheImpl) updateNodeInfoSnapshotList(logger klog.Logger, snapshot *Snapshot, updateAll bool) {
@@ -984,4 +997,61 @@ func (cache *cacheImpl) applyPVCRefCountDelta(snapshot *Snapshot) error {
 	}
 	cache.pvcRefCountsDelta = map[string]int{}
 	return nil
+}
+
+func (cache *cacheImpl) AddPodGroup(podGroup *schedulingv1alpha3.PodGroup) {
+	if !cache.genericWorkloadEnabled {
+		return
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	key := newPodGroupKey(podGroup.Namespace, podGroup.Name)
+	cache.podGroups[key] = podGroup
+}
+
+func (cache *cacheImpl) UpdatePodGroup(oldPodGroup, newPodGroup *schedulingv1alpha3.PodGroup) {
+	if !cache.genericWorkloadEnabled {
+		return
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	key := newPodGroupKey(newPodGroup.Namespace, newPodGroup.Name)
+	cache.podGroups[key] = newPodGroup
+}
+
+func (cache *cacheImpl) RemovePodGroup(podGroup *schedulingv1alpha3.PodGroup) {
+	if !cache.genericWorkloadEnabled {
+		return
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	key := newPodGroupKey(podGroup.Namespace, podGroup.Name)
+	delete(cache.podGroups, key)
+}
+
+func (cache *cacheImpl) GetPodGroup(namespace, name string) (*schedulingv1alpha3.PodGroup, error) {
+	if !cache.genericWorkloadEnabled {
+		return nil, fmt.Errorf("generic workload feature gate is disabled")
+	}
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	key := newPodGroupKey(namespace, name)
+	pg, ok := cache.podGroups[key]
+	if !ok {
+		return nil, fmt.Errorf("pod group %s not found in cache", key)
+	}
+	return pg, nil
+}
+
+type podGroupLister struct {
+	cache *cacheImpl
+}
+
+func (l *podGroupLister) Get(namespace string, name string) (*schedulingv1alpha3.PodGroup, error) {
+	return l.cache.GetPodGroup(namespace, name)
+}
+
+// PodGroups returns a PodGroupLister.
+func (cache *cacheImpl) PodGroups() fwk.PodGroupLister {
+	return &cache.podGroupLister
 }

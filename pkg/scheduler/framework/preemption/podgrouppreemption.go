@@ -27,7 +27,6 @@ import (
 	schedulingapi "k8s.io/api/scheduling/v1alpha3"
 	"k8s.io/apimachinery/pkg/util/sets"
 	policylisters "k8s.io/client-go/listers/policy/v1"
-	schedulinglisters "k8s.io/client-go/listers/scheduling/v1alpha3"
 	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/names"
@@ -41,9 +40,9 @@ import (
 // PodGroupEvaluator is a preemption evaluator that knows how to run
 // preemption where a preemptor is a pod group and the domain is the whole cluster.
 type PodGroupEvaluator struct {
-	Handle         fwk.Handle
-	pdbLister      policylisters.PodDisruptionBudgetLister
-	podGroupLister schedulinglisters.PodGroupLister
+	Handle           fwk.Handle
+	pdbLister        policylisters.PodDisruptionBudgetLister
+	podGroupSnapshot fwk.PodGroupLister
 
 	Executor *Executor
 }
@@ -51,10 +50,10 @@ type PodGroupEvaluator struct {
 // NewPodGroupEvaluator creates a new PodGroupEvaluator.
 func NewPodGroupEvaluator(fh fwk.Handle, executor *Executor) *PodGroupEvaluator {
 	return &PodGroupEvaluator{
-		Handle:         fh,
-		pdbLister:      fh.SharedInformerFactory().Policy().V1().PodDisruptionBudgets().Lister(),
-		podGroupLister: fh.SharedInformerFactory().Scheduling().V1alpha3().PodGroups().Lister(),
-		Executor:       executor,
+		Handle:           fh,
+		pdbLister:        fh.SharedInformerFactory().Policy().V1().PodDisruptionBudgets().Lister(),
+		podGroupSnapshot: fh.SnapshotSharedLister().PodGroups(),
+		Executor:         executor,
 	}
 }
 
@@ -76,7 +75,7 @@ func (ev *PodGroupEvaluator) Preempt(ctx context.Context, pg *schedulingapi.PodG
 	if err != nil {
 		return nil, fwk.AsStatus(fmt.Errorf("failed to list node infos: %w", err))
 	}
-	domain := newDomainForWorkloadPreemption(allNodes, ev.podGroupLister, "cluster-domain")
+	domain := newDomainForWorkloadPreemption(allNodes, ev.podGroupSnapshot, "cluster-domain")
 	preemptor := newPodGroupPreemptor(pg, pods)
 	pdbs, err := getPodDisruptionBudgets(ev.pdbLister)
 	if err != nil {
@@ -307,7 +306,7 @@ func (ev *PodGroupEvaluator) preemptorEligibleToPreemptOthers(_ context.Context,
 // a pod group, it returns the priority of the pod group.
 // Otherwise, it returns the pod's own priority.
 func (ev *PodGroupEvaluator) getPodPriority(p *v1.Pod) int32 {
-	if pg := getPodGroup(p, ev.podGroupLister); pg != nil {
+	if pg := getPodGroup(p, ev.podGroupSnapshot); pg != nil {
 		return util.PodGroupPriority(pg)
 	}
 	return corev1helpers.PodPriority(p)

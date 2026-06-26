@@ -226,7 +226,7 @@ func (sched *Scheduler) runWorkloadAwarePreemption(ctx context.Context, schedFwk
 		return nil, fwk.NewStatus(fwk.Unschedulable, "default preemption plugin is not registered, workload aware preemption is disabled")
 	}
 
-	pg, err := schedFwk.SharedInformerFactory().Scheduling().V1alpha3().PodGroups().Lister().PodGroups(podGroupInfo.Namespace).Get(podGroupInfo.Name)
+	pg, err := sched.Cache.PodGroups().Get(podGroupInfo.Namespace, podGroupInfo.Name)
 	if err != nil {
 		return nil, fwk.AsStatus(fmt.Errorf("failed to get pod group object: %w", err))
 	}
@@ -607,7 +607,7 @@ func (sched *Scheduler) updatePodGroupCondition(ctx context.Context,
 
 	// If the PodGroup was already successfully scheduled, don't regress the
 	// condition back to False on a subsequent cycle for extra pods.
-	pg, err := sched.podGroupLister.PodGroups(podGroupInfo.Namespace).Get(podGroupInfo.Name)
+	pg, err := sched.Cache.PodGroups().Get(podGroupInfo.Namespace, podGroupInfo.Name)
 	if err != nil {
 		utilruntime.HandleErrorWithLogger(logger, err, "Failed to get PodGroup for status update", "podGroup", klog.KObj(podGroupInfo))
 		return

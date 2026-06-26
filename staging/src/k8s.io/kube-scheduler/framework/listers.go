@@ -50,6 +50,7 @@ type SharedLister interface {
 	NodeInfos() NodeInfoLister
 	StorageInfos() StorageInfoLister
 	PodGroupStates() PodGroupStateLister
+	PodGroups() PodGroupLister
 }
 
 // PodGroupStateLister provides read access to pod group states.
@@ -153,7 +154,6 @@ type SharedDRAManager interface {
 	ResourceSlices() ResourceSliceLister
 	DeviceClasses() DeviceClassLister
 	DeviceClassResolver() DeviceClassResolver
-	PodGroups() PodGroupLister
 }
 
 // CSIManager can be used to obtain CSINode objects, and track changes to CSINode objects in-memory.
@@ -168,6 +168,8 @@ type CSIManager interface {
 type PodGroupManager interface {
 	// PodGroupStates returns the PodGroupStateLister.
 	PodGroupStates() PodGroupStateLister
+	// PodGroups returns the PodGroupLister.
+	PodGroups() PodGroupLister
 }
 
 // PodGroupState provides an interface to view the state of a single pod group.
