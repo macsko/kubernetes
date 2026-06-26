@@ -18,7 +18,6 @@ package scheduler
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -363,10 +362,10 @@ func TestPodGroupCycle_UpdateSnapshotError(t *testing.T) {
 			return updateSnapshotErr
 		},
 	}
+	cache.AddPodGroup(testPodGroup)
 
 	client := clientsetfake.NewClientset(testPodGroup)
 	informerFactory := informers.NewSharedInformerFactory(client, 0)
-	podGroupLister := informerFactory.Scheduling().V1alpha3().PodGroups().Lister()
 	informerFactory.Start(ctx.Done())
 	informerFactory.WaitForCacheSync(ctx.Done())
 
@@ -376,7 +375,6 @@ func TestPodGroupCycle_UpdateSnapshotError(t *testing.T) {
 		SchedulingQueue: internalqueue.NewTestQueue(ctx, nil),
 		Cache:           cache,
 		client:          client,
-		podGroupLister:  podGroupLister,
 		FailureHandler: func(ctx context.Context, fwk framework.Framework, p *framework.QueuedPodInfo, status *fwk.Status, ni *fwk.NominatingInfo, start time.Time) {
 			failureHandlerCalled = true
 			if updateSnapshotErr.Error() != status.AsError().Error() {
@@ -440,7 +438,6 @@ func TestPodGroupCycle_FillsPodResultsOnFewerResults(t *testing.T) {
 
 	client := clientsetfake.NewSimpleClientset(testPodGroup, testNode)
 	informerFactory := informers.NewSharedInformerFactory(client, 0)
-	podGroupLister := informerFactory.Scheduling().V1alpha3().PodGroups().Lister()
 
 	informerFactory.Start(ctx.Done())
 	informerFactory.WaitForCacheSync(ctx.Done())
@@ -459,6 +456,7 @@ func TestPodGroupCycle_FillsPodResultsOnFewerResults(t *testing.T) {
 	}
 
 	cache := internalcache.New(ctx, nil, true)
+	cache.AddPodGroup(testPodGroup)
 	logger, ctx := ktesting.NewTestContext(t)
 	cache.AddNode(logger, testNode)
 
@@ -470,7 +468,6 @@ func TestPodGroupCycle_FillsPodResultsOnFewerResults(t *testing.T) {
 		SchedulingQueue:  internalqueue.NewTestQueue(ctx, nil),
 		Cache:            cache,
 		client:           client,
-		podGroupLister:   podGroupLister,
 		nodeInfoSnapshot: internalcache.NewEmptySnapshot(),
 		FailureHandler: func(ctx context.Context, fwk framework.Framework, p *framework.QueuedPodInfo, status *fwk.Status, ni *fwk.NominatingInfo, start time.Time) {
 			lock.Lock()
@@ -618,7 +615,6 @@ func TestPodGroupCycle_PodGroupPostFilter(t *testing.T) {
 
 			client := clientsetfake.NewSimpleClientset(testPodGroup, testNode)
 			informerFactory := informers.NewSharedInformerFactory(client, 0)
-			podGroupLister := informerFactory.Scheduling().V1alpha3().PodGroups().Lister()
 
 			informerFactory.Start(ctx.Done())
 			informerFactory.WaitForCacheSync(ctx.Done())
@@ -637,6 +633,7 @@ func TestPodGroupCycle_PodGroupPostFilter(t *testing.T) {
 			}
 
 			cache := internalcache.New(ctx, nil, true)
+			cache.AddPodGroup(testPodGroup)
 			logger, ctx := ktesting.NewTestContext(t)
 			cache.AddNode(logger, testNode)
 
@@ -645,7 +642,6 @@ func TestPodGroupCycle_PodGroupPostFilter(t *testing.T) {
 				SchedulingQueue:        internalqueue.NewTestQueue(ctx, nil),
 				Cache:                  cache,
 				client:                 client,
-				podGroupLister:         podGroupLister,
 				nodeInfoSnapshot:       internalcache.NewEmptySnapshot(),
 				genericWorkloadEnabled: tt.genericWorkloadEnabled,
 				FailureHandler: func(ctx context.Context, fwk framework.Framework, p *framework.QueuedPodInfo, status *fwk.Status, ni *fwk.NominatingInfo, start time.Time) {
@@ -1610,16 +1606,15 @@ func TestSubmitPodGroupAlgorithmResult(t *testing.T) {
 			}
 
 			cache := internalcache.New(ctx, nil, true)
+			cache.AddPodGroup(pg)
 			cache.AddNode(klog.FromContext(ctx), testNode)
 
 			informerFactory := informers.NewSharedInformerFactory(client, 0)
-			podGroupLister := informerFactory.Scheduling().V1alpha3().PodGroups().Lister()
 			informerFactory.Start(ctx.Done())
 			informerFactory.WaitForCacheSync(ctx.Done())
 
 			sched := &Scheduler{
 				client:          client,
-				podGroupLister:  podGroupLister,
 				Cache:           cache,
 				Profiles:        profile.Map{"test-scheduler": schedFwk},
 				SchedulingQueue: internalqueue.NewTestQueue(ctx, nil),
@@ -1971,23 +1966,6 @@ func TestUpdatePodGroupCondition(t *testing.T) {
 			expectLastTransitionTimeUnchanged: true,
 		},
 		{
-			name:         "PodGroup not found does not panic",
-			namespace:    "ns1",
-			podGroupName: "nonexistent",
-			condition: &metav1.Condition{
-				Type:    schedulingapi.PodGroupInitiallyScheduled,
-				Status:  metav1.ConditionTrue,
-				Reason:  "SomeReason",
-				Message: "test",
-			},
-			expectCondition: &metav1.Condition{
-				Type:    schedulingapi.PodGroupInitiallyScheduled,
-				Status:  metav1.ConditionTrue,
-				Reason:  "SomeReason",
-				Message: "test",
-			},
-		},
-		{
 			name: "ObservedGeneration is set from PodGroup generation",
 			existingPodGroup: &schedulingv1alpha3.PodGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "pg-gen", Namespace: "ns1", Generation: 7},
@@ -2020,16 +1998,20 @@ func TestUpdatePodGroupCondition(t *testing.T) {
 			}
 			client := clientsetfake.NewClientset(objects...)
 			informerFactory := informers.NewSharedInformerFactory(client, 0)
-			podGroupLister := informerFactory.Scheduling().V1alpha3().PodGroups().Lister()
 			informerFactory.Start(ctx.Done())
 			informerFactory.WaitForCacheSync(ctx.Done())
-			sched := &Scheduler{client: client, podGroupLister: podGroupLister}
+			cache := internalcache.New(ctx, nil, true)
+			if tt.existingPodGroup != nil {
+				cache.AddPodGroup(tt.existingPodGroup)
+			}
+			sched := &Scheduler{
+				client: client,
+				Cache:  cache,
+			}
 
 			var existingLTT metav1.Time
-			if tt.existingPodGroup != nil {
-				if existing := apimeta.FindStatusCondition(tt.existingPodGroup.Status.Conditions, schedulingapi.PodGroupInitiallyScheduled); existing != nil {
-					existingLTT = existing.LastTransitionTime
-				}
+			if existing := apimeta.FindStatusCondition(tt.existingPodGroup.Status.Conditions, schedulingapi.PodGroupInitiallyScheduled); existing != nil {
+				existingLTT = existing.LastTransitionTime
 			}
 
 			podGroupInfo := &framework.QueuedPodGroupInfo{
@@ -2041,12 +2023,6 @@ func TestUpdatePodGroupCondition(t *testing.T) {
 			sched.updatePodGroupCondition(ctx, podGroupInfo, tt.condition)
 
 			updatedPodGroup, err := client.SchedulingV1alpha3().PodGroups(tt.namespace).Get(ctx, tt.podGroupName, metav1.GetOptions{})
-			if tt.existingPodGroup == nil {
-				if err == nil {
-					t.Fatalf("Expected PodGroup to not be found, but got: %v", updatedPodGroup)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatalf("Failed to get PodGroup: %v", err)
 			}
@@ -2779,7 +2755,7 @@ func TestRunWorkloadAwarePreemption(t *testing.T) {
 	tests := []struct {
 		name                 string
 		podGroupInfo         *framework.QueuedPodGroupInfo
-		existingPodGroups    []*schedulingv1alpha3.PodGroup
+		existingPodGroup     *schedulingv1alpha3.PodGroup
 		pluginsRegistered    bool
 		pluginReturnStatus   *fwk.Status
 		pluginNominatedNodes map[string]*fwk.NominatingInfo
@@ -2794,17 +2770,6 @@ func TestRunWorkloadAwarePreemption(t *testing.T) {
 			expectedStatus:    fwk.NewStatus(fwk.Unschedulable, "default preemption plugin is not registered, workload aware preemption is disabled"),
 		},
 		{
-			name: "error when pod group is not found in informer",
-			podGroupInfo: &framework.QueuedPodGroupInfo{
-				PodGroupInfo: &framework.PodGroupInfo{Namespace: "default", Name: "missing-pg"},
-				QueuedPodInfos: []*framework.QueuedPodInfo{
-					{PodInfo: &framework.PodInfo{Pod: st.MakePod().Name("p1").Namespace("default").Obj()}},
-				},
-			},
-			pluginsRegistered: true,
-			expectedStatus:    fwk.AsStatus(fmt.Errorf("failed to get pod group object: podgroup.scheduling.k8s.io \"missing-pg\" not found")),
-		},
-		{
 			name: "error when pod group has scheduling constraints",
 			podGroupInfo: &framework.QueuedPodGroupInfo{
 				PodGroupInfo: &framework.PodGroupInfo{Namespace: "default", Name: "pg-with-constraints"},
@@ -2812,13 +2777,11 @@ func TestRunWorkloadAwarePreemption(t *testing.T) {
 					{PodInfo: &framework.PodInfo{Pod: st.MakePod().Name("p1").Namespace("default").Obj()}},
 				},
 			},
-			existingPodGroups: []*schedulingv1alpha3.PodGroup{
-				{
-					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pg-with-constraints"},
-					Spec: schedulingv1alpha3.PodGroupSpec{
-						SchedulingConstraints: &schedulingv1alpha3.PodGroupSchedulingConstraints{
-							Topology: []schedulingv1alpha3.TopologyConstraint{{}}, // non-empty
-						},
+			existingPodGroup: &schedulingv1alpha3.PodGroup{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pg-with-constraints"},
+				Spec: schedulingv1alpha3.PodGroupSpec{
+					SchedulingConstraints: &schedulingv1alpha3.PodGroupSchedulingConstraints{
+						Topology: []schedulingv1alpha3.TopologyConstraint{{}}, // non-empty
 					},
 				},
 			},
@@ -2833,10 +2796,8 @@ func TestRunWorkloadAwarePreemption(t *testing.T) {
 					{PodInfo: &framework.PodInfo{Pod: st.MakePod().Name("p1").Namespace("default").Obj()}},
 				},
 			},
-			existingPodGroups: []*schedulingv1alpha3.PodGroup{
-				{
-					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pg-success"},
-				},
+			existingPodGroup: &schedulingv1alpha3.PodGroup{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pg-success"},
 			},
 			pluginsRegistered:  true,
 			pluginReturnStatus: fwk.NewStatus(fwk.Success),
@@ -2853,27 +2814,12 @@ func TestRunWorkloadAwarePreemption(t *testing.T) {
 					{PodInfo: &framework.PodInfo{Pod: st.MakePod().Name("p1").Namespace("default").Obj()}},
 				},
 			},
-			existingPodGroups: []*schedulingv1alpha3.PodGroup{
-				{
-					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pg-unschedulable"},
-				},
+			existingPodGroup: &schedulingv1alpha3.PodGroup{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pg-unschedulable"},
 			},
 			pluginsRegistered:  true,
 			pluginReturnStatus: fwk.NewStatus(fwk.Unschedulable, "not enough resources"),
 			expectedStatus:     fwk.NewStatus(fwk.Unschedulable, "not enough resources"),
-		},
-		{
-			name: "error when pod group does not exist",
-			podGroupInfo: &framework.QueuedPodGroupInfo{
-				PodGroupInfo: &framework.PodGroupInfo{Namespace: "default", Name: "pg-unschedulable"},
-				QueuedPodInfos: []*framework.QueuedPodInfo{
-					{PodInfo: &framework.PodInfo{Pod: st.MakePod().Name("p1").Namespace("default").Obj()}},
-				},
-			},
-			existingPodGroups:  []*schedulingv1alpha3.PodGroup{},
-			pluginsRegistered:  true,
-			pluginReturnStatus: fwk.NewStatus(fwk.Success),
-			expectedStatus:     fwk.AsStatus(fmt.Errorf("failed to get pod group object: %w", errors.New("podgroup.scheduling.k8s.io \"pg-unschedulable\" not found"))),
 		},
 	}
 
@@ -2921,8 +2867,8 @@ func TestRunWorkloadAwarePreemption(t *testing.T) {
 			}
 
 			objs := []runtime.Object{}
-			for _, pg := range tt.existingPodGroups {
-				objs = append(objs, pg)
+			if tt.existingPodGroup != nil {
+				objs = append(objs, tt.existingPodGroup)
 			}
 			client := clientsetfake.NewSimpleClientset(objs...)
 			informerFactory := informers.NewSharedInformerFactory(client, 0)
@@ -2935,18 +2881,18 @@ func TestRunWorkloadAwarePreemption(t *testing.T) {
 				t.Fatalf("Failed to create framework: %v", err)
 			}
 
-			podGroupLister := informerFactory.Scheduling().V1alpha3().PodGroups().Lister()
-
 			if tt.pluginsRegistered {
 				informerFactory.Start(ctx.Done())
 				informerFactory.WaitForCacheSync(ctx.Done())
 			}
 
 			cache := internalcache.New(ctx, nil, true)
+			if tt.existingPodGroup != nil {
+				cache.AddPodGroup(tt.existingPodGroup)
+			}
 			sched := &Scheduler{
 				Cache:            cache,
 				nodeInfoSnapshot: internalcache.NewEmptySnapshot(), // Need empty snapshot to avoid nil pointer issues
-				podGroupLister:   podGroupLister,
 			}
 
 			// Just inject logger explicitly in context to avoid panic
@@ -3028,8 +2974,6 @@ func TestPodGroupCycle_NominatedNodes(t *testing.T) {
 
 	client := clientsetfake.NewSimpleClientset(testPodGroup)
 	informerFactory := informers.NewSharedInformerFactory(client, 0)
-	podGroupLister := informerFactory.Scheduling().V1alpha3().PodGroups().Lister()
-
 	informerFactory.Start(ctx.Done())
 	informerFactory.WaitForCacheSync(ctx.Done())
 
@@ -3043,11 +2987,11 @@ func TestPodGroupCycle_NominatedNodes(t *testing.T) {
 	}
 
 	cache := internalcache.New(ctx, nil, true)
+	cache.AddPodGroup(testPodGroup)
 	sched := &Scheduler{
 		Profiles:         profile.Map{"test-scheduler": schedFwk},
 		Cache:            cache,
 		nodeInfoSnapshot: internalcache.NewEmptySnapshot(),
-		podGroupLister:   podGroupLister,
 		client:           client,
 		SchedulingQueue:  internalqueue.NewTestQueue(ctx, nil),
 	}
@@ -3090,3 +3034,5 @@ func TestPodGroupCycle_NominatedNodes(t *testing.T) {
 		t.Errorf("Expected p2 to not be nominated, got %v", capturedFailureHandler[p2.Name])
 	}
 }
+
+
