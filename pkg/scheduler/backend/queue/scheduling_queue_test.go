@@ -347,6 +347,13 @@ func Test_InFlightPods(t *testing.T) {
 		// ONLY ONE of the following should be set.
 		eventHappens *fwk.ClusterEvent
 		podPopped    *v1.Pod
+		// podEventsDropped is the Pod that has its events dropped.
+		podEventsDropped *v1.Pod
+		// podDone is the Pod for which Done() is called.
+		podDone *v1.Pod
+		// podUpdatedOld and podUpdatedNew are used to simulate a pod update event via Update().
+		podUpdatedOld *v1.Pod
+		podUpdatedNew *v1.Pod
 		// podCreated is the Pod that is created and inserted into the activeQ.
 		podCreated *v1.Pod
 		// podEnqueued is the Pod that is enqueued back to activeQ.
@@ -1074,6 +1081,110 @@ func Test_InFlightPods(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:                   "Pod has events dropped with DropEvents: pod remains in inFlightPods but events are pruned from inFlightEvents",
+			genericWorkloadEnabled: []bool{true, false},
+			initialPods:            []*v1.Pod{pod1},
+			actions: []action{
+				{podPopped: pod1},
+				{eventHappens: &pvAdd},
+				{podEventsDropped: pod1},
+			},
+			wantInFlightPods:   []*v1.Pod{pod1},
+			wantInFlightEvents: nil,
+			queueingHintMap: QueueingHintMapPerProfile{
+				"": {
+					pvAdd: {
+						{
+							PluginName:     "fooPlugin1",
+							QueueingHintFn: queueHintReturnQueue,
+						},
+					},
+				},
+			},
+		},
+		{
+			name:                   "Pod has events dropped with DropEvents and then Done is called: pod is removed from inFlightPods",
+			genericWorkloadEnabled: []bool{true, false},
+			initialPods:            []*v1.Pod{pod1},
+			actions: []action{
+				{podPopped: pod1},
+				{eventHappens: &pvAdd},
+				{podEventsDropped: pod1},
+				{podDone: pod1},
+			},
+			wantInFlightPods:   nil,
+			wantInFlightEvents: nil,
+			queueingHintMap: QueueingHintMapPerProfile{
+				"": {
+					pvAdd: {
+						{
+							PluginName:     "fooPlugin1",
+							QueueingHintFn: queueHintReturnQueue,
+						},
+					},
+				},
+			},
+		},
+		{
+			name:                   "Multiple pods in-flight: first pod drops events, intermediate events pruned, second pod retains its events",
+			genericWorkloadEnabled: []bool{true, false},
+			initialPods:            []*v1.Pod{pod1, pod2},
+			actions: []action{
+				{podPopped: pod1},
+				{eventHappens: &pvAdd},
+				{podPopped: pod2},
+				{eventHappens: &nodeAdd},
+				{podEventsDropped: pod1},
+			},
+			wantInFlightPods:   []*v1.Pod{pod1, pod2},
+			wantInFlightEvents: []interface{}{pod2, nodeAdd},
+			queueingHintMap: QueueingHintMapPerProfile{
+				"": {
+					pvAdd: {
+						{
+							PluginName:     "fooPlugin1",
+							QueueingHintFn: queueHintReturnQueue,
+						},
+					},
+					nodeAdd: {
+						{
+							PluginName:     "fooPlugin1",
+							QueueingHintFn: queueHintReturnQueue,
+						},
+					},
+				},
+			},
+		},
+		{
+			name:                   "Pod is updated while in-flight, and when requeued via AddUnschedulablePodIfNotPresent, the queued pod is updated with the new pod object",
+			genericWorkloadEnabled: []bool{true, false},
+			initialPods:            []*v1.Pod{pod1},
+			actions: []action{
+				{podPopped: pod1},
+				{podUpdatedOld: pod1, podUpdatedNew: func() *v1.Pod {
+					p := pod1.DeepCopy()
+					p.Annotations = map[string]string{"foo": "bar"}
+					return p
+				}()},
+				{podEnqueued: newQueuedPodInfoForLookup(pod1)},
+				{callback: func(t *testing.T, q *PriorityQueue) {
+					pInfo, exists := q.backoffQ.get(newQueuedPodInfoForLookup(pod1))
+					if !exists || pInfo == nil {
+						t.Fatalf("expected pod to be in backoffQ")
+					}
+					var foundPod *v1.Pod
+					pInfo.ForEachPodInfo(func(pi *framework.QueuedPodInfo) bool {
+						foundPod = pi.Pod
+						return true
+					})
+					if foundPod == nil || foundPod.Annotations["foo"] != "bar" {
+						t.Fatalf("expected pod to have updated annotation, got %v", foundPod)
+					}
+				}},
+			},
+			wantBackoffQPodNames: []string{"targetpod"},
+		},
 	}
 
 	for _, test := range tests {
@@ -1127,6 +1238,12 @@ func Test_InFlightPods(t *testing.T) {
 						q.Add(ctx, action.podCreated)
 					case action.podPopped != nil:
 						popPod(t, logger, q, action.podPopped)
+					case action.podEventsDropped != nil:
+						q.DropEvents(action.podEventsDropped.UID)
+					case action.podDone != nil:
+						q.Done(action.podDone.UID)
+					case action.podUpdatedOld != nil && action.podUpdatedNew != nil:
+						q.Update(ctx, action.podUpdatedOld, action.podUpdatedNew)
 					case action.eventHappens != nil:
 						q.MoveAllToActiveOrBackoffQueue(logger, *action.eventHappens, nil, nil, nil)
 					case action.podEnqueued != nil:

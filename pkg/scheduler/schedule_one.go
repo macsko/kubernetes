@@ -450,9 +450,9 @@ func (sched *Scheduler) bindingCycle(
 	// We define the Pod as "unschedulable" only when Pods are rejected at specific extension points, and Permit is the last one in the scheduling/binding cycle.
 	// If a Pod fails on PreBind or Bind, it should be moved to BackoffQ for retry.
 	//
-	// We can call Done() here because
+	// We can call DropEvents() here because
 	// we can free the cluster events stored in the scheduling queue sooner, which is worth for busy clusters memory consumption wise.
-	sched.SchedulingQueue.Done(assumedPod.UID)
+	sched.SchedulingQueue.DropEvents(assumedPod.UID)
 
 	// If we are going to run prebind plugins we put the pod in binding map to optimize preemption.
 	if preFlightStatus.IsSuccess() {
@@ -478,6 +478,8 @@ func (sched *Scheduler) bindingCycle(
 	if status := sched.bind(ctx, schedFramework, assumedPod, scheduleResult.SuggestedHost, state); !status.IsSuccess() {
 		return status
 	}
+
+	sched.SchedulingQueue.Done(assumedPod.UID)
 
 	// Calculating nodeResourceString can be heavy. Avoid it if klog verbosity is below 2.
 	logger.V(2).Info("Successfully bound pod to node", "pod", klog.KObj(assumedPod), "node", scheduleResult.SuggestedHost, "evaluatedNodes", scheduleResult.EvaluatedNodes, "feasibleNodes", scheduleResult.FeasibleNodes)

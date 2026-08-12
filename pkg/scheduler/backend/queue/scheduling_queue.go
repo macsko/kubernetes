@@ -127,6 +127,9 @@ type SchedulingQueue interface {
 	// Done must be called for pod returned by Pop. This allows the queue to
 	// keep track of which pods are currently being processed.
 	Done(types.UID)
+	// DropEvents drops the cluster events stored for an in-flight pod,
+	// while retaining the pod's in-flight status.
+	DropEvents(types.UID)
 	Update(ctx context.Context, oldPod, newPod *v1.Pod)
 	Delete(logger klog.Logger, pod *v1.Pod)
 	// Important Note: preCheck shouldn't include anything that depends on the in-tree plugins' logic.
@@ -1082,6 +1085,12 @@ func (p *PriorityQueue) AddUnschedulablePodIfNotPresent(logger klog.Logger, pInf
 		}
 	}()
 
+	if storedPod := p.activeQ.inFlightPod(pInfo.Pod.UID); storedPod != nil {
+		if _, err := pInfo.Update(storedPod); err != nil {
+			logger.Error(err, "Failed to update queued pod info with stored in-flight pod", "pod", klog.KObj(pInfo.Pod))
+		}
+	}
+
 	pod := pInfo.Pod
 	if p.unschedulableEntities.get(pInfo) != nil {
 		return fmt.Errorf("Pod %v is already present in unschedulable queue", klog.KObj(pod))
@@ -1340,6 +1349,12 @@ func (p *PriorityQueue) Pop(logger klog.Logger) (framework.QueuedEntityInfo, err
 // keep track of which pods are currently being processed.
 func (p *PriorityQueue) Done(pod types.UID) {
 	p.activeQ.done(pod)
+}
+
+// DropEvents drops the cluster events stored for an in-flight pod,
+// while retaining the pod's in-flight status.
+func (p *PriorityQueue) DropEvents(pod types.UID) {
+	p.activeQ.dropEvents(pod)
 }
 
 func (p *PriorityQueue) InFlightPods() []*v1.Pod {
