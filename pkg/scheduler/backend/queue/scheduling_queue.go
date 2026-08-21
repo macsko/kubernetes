@@ -83,9 +83,9 @@ const (
 )
 
 // PreEnqueueCheck is a function type. It's used to build functions that
-// run against a Pod and the caller can choose to enqueue or skip the Pod
+// run against an entity and the caller can choose to enqueue or skip the entity
 // by the checking result.
-type PreEnqueueCheck func(pod *v1.Pod) bool
+type PreEnqueueCheck func(entity framework.QueuedEntityInfo) bool
 
 // PodSigner creates a scheduling signature for a pod that represents its scheduling requirements.
 // The signature is used by the opportunistic batching feature (KEP-5598) to reuse scheduling decisions.
@@ -565,12 +565,17 @@ func (p *PriorityQueue) isEntityWorthRequeuing(logger klog.Logger, entity framew
 	// For pod groups, if any pod is worth requeuing, the whole group is worth it.
 	// But we should prioritize higher strategies.
 	bestStrategy := queueSkip
+	hasPending := entity.HasPodsWithPendingPlugins()
 	entity.ForEachPodInfo(func(pInfo *framework.QueuedPodInfo) bool {
 		strategy := p.isPodWorthRequeuing(logger, pInfo, event, oldObj, newObj, hintKeys)
 		if strategy > bestStrategy {
 			bestStrategy = strategy
 		}
 		if bestStrategy == queueImmediately {
+			return false
+		}
+		// If no pods have pending plugins, the best strategy is queueAfterBackoff.
+		if !hasPending && bestStrategy == queueAfterBackoff {
 			return false
 		}
 		return true
@@ -706,8 +711,12 @@ func queueingHintToLabel(hint fwk.QueueingHint, err error) string {
 // to activeQ by related cluster event.
 func (p *PriorityQueue) runPreEnqueuePlugins(ctx context.Context, entity framework.QueuedEntityInfo) {
 	var anyGatedPodInfo *framework.QueuedPodInfo
-	// Run PreEnqueue plugins for each pod, even if it could stop after the first being gated,
-	// as we need to populate any per-pod metrics.
+	// Run PreEnqueue plugins for each pod, until one stays gated.
+	// Breaking after the first gated pod is sufficient,
+	// because in case of pod groups, this specific pod has to be ungated before ungating the group.
+	// Gating conditions for other pods, even if caused by different plugins,
+	// will be handled in later runs. One caveat is that the unschedulable_pods metric
+	// is less accurate in such a case, but the performance gain makes it an acceptable tradeoff.
 	entity.ForEachPodInfo(func(pInfo *framework.QueuedPodInfo) bool {
 		p.runPreEnqueuePluginsForPod(ctx, pInfo)
 		if pInfo.Gated() {
@@ -715,6 +724,7 @@ func (p *PriorityQueue) runPreEnqueuePlugins(ctx context.Context, entity framewo
 			// Otherwise, such gated pod would have to be put in a separate entity object
 			// and tracked individually, complicating the flow.
 			anyGatedPodInfo = pInfo
+			return false
 		}
 		return true
 	})
@@ -1835,7 +1845,7 @@ func (p *PriorityQueue) collectEntitiesToEvaluate(logger klog.Logger, event fwk.
 		for nn := range hintKeys.candidatePods {
 			entityKey := fwk.PodKey(nn.Namespace, nn.Name).String()
 			if entity, exists := p.unschedulableEntities.entityInfoMap[entityKey]; exists {
-				if preCheck == nil || preCheck(entity.(*framework.QueuedPodInfo).Pod) {
+				if preCheck == nil || preCheck(entity) {
 					entities = append(entities, entity)
 				}
 				continue
@@ -1851,9 +1861,7 @@ func (p *PriorityQueue) collectEntitiesToEvaluate(logger klog.Logger, event fwk.
 					entityKey = fwk.PodGroupKey(nn.Namespace, *pod.Spec.SchedulingGroup.PodGroupName).String()
 					if entity, exists := p.unschedulableEntities.entityInfoMap[entityKey]; exists && !seen[entityKey] {
 						seen[entityKey] = true
-						// Only preCheck the specific pod identified by PreQueueingHint,
-						// not all members of the PodGroup.
-						if preCheck == nil || preCheck(pod) {
+						if preCheck == nil || preCheck(entity) {
 							entities = append(entities, entity)
 						}
 					}
@@ -1866,13 +1874,9 @@ func (p *PriorityQueue) collectEntitiesToEvaluate(logger klog.Logger, event fwk.
 	// No narrowing — evaluate all unschedulable entities.
 	entities := make([]framework.QueuedEntityInfo, 0, len(p.unschedulableEntities.entityInfoMap))
 	for _, entity := range p.unschedulableEntities.entityInfoMap {
-		entity.ForEachPodInfo(func(pInfo *framework.QueuedPodInfo) bool {
-			if preCheck == nil || preCheck(pInfo.Pod) {
-				entities = append(entities, entity)
-				return false
-			}
-			return true
-		})
+		if preCheck == nil || preCheck(entity) {
+			entities = append(entities, entity)
+		}
 	}
 	return entities, nil
 }

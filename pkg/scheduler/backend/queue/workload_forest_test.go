@@ -784,7 +784,7 @@ func TestWorkloadForest_GetRootLookupInfoForPod(t *testing.T) {
 			if wantFound := tt.wantInfo != nil; gotFound != wantFound {
 				t.Errorf("Expected found: %v, got: %v", wantFound, gotFound)
 			}
-			if diff := cmp.Diff(tt.wantInfo, gotInfo); diff != "" {
+			if diff := cmp.Diff(tt.wantInfo, gotInfo, cmp.AllowUnexported(framework.QueuedPodGroupInfo{})); diff != "" {
 				t.Errorf("Unexpected QueuedPodGroupInfo (-want,+got)\n%s", diff)
 			}
 		})
@@ -910,7 +910,7 @@ func TestWorkloadForest_GetRootLookupInfoForPodGroup(t *testing.T) {
 			if wantFound := tt.wantInfo != nil; gotFound != wantFound {
 				t.Errorf("Expected found: %v, got: %v", wantFound, gotFound)
 			}
-			if diff := cmp.Diff(tt.wantInfo, gotInfo); diff != "" {
+			if diff := cmp.Diff(tt.wantInfo, gotInfo, cmp.AllowUnexported(framework.QueuedPodGroupInfo{})); diff != "" {
 				t.Errorf("Unexpected QueuedPodGroupInfo (-want,+got)\n%s", diff)
 			}
 		})
@@ -978,7 +978,7 @@ func TestWorkloadForest_GetRootLookupInfoForCPG(t *testing.T) {
 			if wantFound := tt.wantInfo != nil; gotFound != wantFound {
 				t.Errorf("Expected found: %v, got: %v", wantFound, gotFound)
 			}
-			if diff := cmp.Diff(tt.wantInfo, gotInfo); diff != "" {
+			if diff := cmp.Diff(tt.wantInfo, gotInfo, cmp.AllowUnexported(framework.QueuedPodGroupInfo{})); diff != "" {
 				t.Errorf("Unexpected QueuedPodGroupInfo (-want,+got)\n%s", diff)
 			}
 		})

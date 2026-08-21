@@ -336,8 +336,7 @@ func (wf *workloadForest) buildQueuedPodGroupInfo(logger klog.Logger, rootLookup
 		return nil
 	}
 	return &framework.QueuedPodGroupInfo{
-		PodGroupInfo:   pgi,
-		QueuedPodInfos: make(map[fwk.EntityKey][]*framework.QueuedPodInfo),
+		PodGroupInfo: pgi,
 	}
 }
 
