@@ -114,7 +114,7 @@ func (sched *Scheduler) scheduleOnePodGroup(ctx context.Context, podGroupInfo *f
 	// skipPodGroupPodSchedule could remove some pods from the pod group.
 	// Pod group constraints will be re-evaluated on a PlacementFeasible phase.
 	// Now, verify if it has any pods left.
-	if len(podGroupInfo.QueuedPodInfos) == 0 {
+	if !podGroupInfo.HasQueuedPodInfos() {
 		// Finish the in-flight attempt so members that arrived while these pods were
 		// being skipped can be requeued instead of remaining pending indefinitely.
 		if err := sched.SchedulingQueue.AddAttemptedPodGroupIfNeeded(logger, podGroupInfo, sched.SchedulingQueue.SchedulingCycle(), fwk.NewStatus(fwk.Success)); err != nil {
@@ -402,7 +402,7 @@ func (sched *Scheduler) podGroupCycle(ctx context.Context, schedFwk framework.Fr
 		completePGResults = completeCompositePodGroupAlgorithmResult(ctx, rootPodGroupInfo, podGroupCycleState, pgResults)
 	} else {
 		// pgResults has exactly 1 element.
-		queuedPodInfos := rootPodGroupInfo.QueuedPodInfos[pgKey(rootPodGroupInfo.PodGroupInfo)]
+		queuedPodInfos := rootPodGroupInfo.GetQueuedPodInfos(pgKey(rootPodGroupInfo.PodGroupInfo))
 		result := completePodGroupAlgorithmResult(ctx, queuedPodInfos, podGroupCycleState, pgResults[pgKey(rootPodGroupInfo.PodGroupInfo)])
 		completePGResults = map[fwk.EntityKey]*podGroupAlgorithmResult{pgKey(rootPodGroupInfo.PodGroupInfo): result}
 	}
@@ -531,7 +531,7 @@ func (sched *Scheduler) podGroupSchedulingDefaultAlgorithm(ctx context.Context, 
 	}()
 
 	// Retrieve the queued podinfos for the given pod group from the root queuedPodGroupInfo.
-	queuedPodInfos := queuedPodGroupInfo.QueuedPodInfos[pgKey(podGroupInfo)]
+	queuedPodInfos := queuedPodGroupInfo.GetQueuedPodInfos(pgKey(podGroupInfo))
 	result = &podGroupAlgorithmResult{
 		podGroupInfo:        podGroupInfo,
 		podResults:          make([]algorithmResult, 0, len(queuedPodInfos)),
@@ -704,19 +704,14 @@ func completePodGroupAlgorithmResult(ctx context.Context, queuedPodInfos []*fram
 // It ensures that every pod in every subgroup has a fully populated status and that failure statuses
 // are propagated down the tree before finalizing the cycle.
 func completeCompositePodGroupAlgorithmResult(ctx context.Context, rootPodGroupInfo *framework.QueuedPodGroupInfo, rootCycleState *framework.CycleState, pgResults map[fwk.EntityKey]*podGroupAlgorithmResult) map[fwk.EntityKey]*podGroupAlgorithmResult {
-	completeCompositePodGroupAlgorithmResultMap(ctx, rootPodGroupInfo.PodGroupInfo, pgResults, &podGroupAlgorithmResult{})
-	for pgKey, queuedPodInfos := range rootPodGroupInfo.QueuedPodInfos {
-		pgResult := pgResults[pgKey]
-		// Ensure podResults has an entry for each pod in the pod group with a status.
-		completePodGroupAlgorithmResult(ctx, queuedPodInfos, rootCycleState, pgResult)
-	}
+	completeCompositePodGroupAlgorithmResultMap(ctx, rootPodGroupInfo, rootCycleState, rootPodGroupInfo.PodGroupInfo, pgResults, &podGroupAlgorithmResult{})
 	return pgResults
 }
 
 // completeCompositePodGroupAlgorithmResultMap propagates scheduling failures from parents to children.
 // This is necessary because child pod groups cannot be committed or bound if their parent composite
 // pod group fails to meet its scheduling requirements.
-func completeCompositePodGroupAlgorithmResultMap(ctx context.Context, podGroupInfo *framework.PodGroupInfo, pgResults map[fwk.EntityKey]*podGroupAlgorithmResult, parentResult *podGroupAlgorithmResult) {
+func completeCompositePodGroupAlgorithmResultMap(ctx context.Context, rootPodGroupInfo *framework.QueuedPodGroupInfo, rootCycleState *framework.CycleState, podGroupInfo *framework.PodGroupInfo, pgResults map[fwk.EntityKey]*podGroupAlgorithmResult, parentResult *podGroupAlgorithmResult) {
 	key := pgKey(podGroupInfo)
 	result, ok := pgResults[key]
 	// When a parent composite pod group fails, any child that previously succeeded during its own evaluation
@@ -730,8 +725,12 @@ func completeCompositePodGroupAlgorithmResultMap(ctx context.Context, podGroupIn
 	}
 	if podGroupInfo.CompositePodGroup != nil {
 		for _, child := range podGroupInfo.GetChildGroups() {
-			completeCompositePodGroupAlgorithmResultMap(ctx, child, pgResults, result)
+			completeCompositePodGroupAlgorithmResultMap(ctx, rootPodGroupInfo, rootCycleState, child, pgResults, result)
 		}
+	} else {
+		queuedPodInfos := rootPodGroupInfo.GetQueuedPodInfos(key)
+		// Ensure podResults has an entry for each pod in the pod group with a status.
+		completePodGroupAlgorithmResult(ctx, queuedPodInfos, rootCycleState, result)
 	}
 }
 
@@ -787,7 +786,7 @@ func (sched *Scheduler) submitPodGroupAlgorithmResult(ctx context.Context, sched
 			// Composite pod groups do not own any pods directly.
 			continue
 		}
-		queuedPodInfos := rootPodGroupInfo.QueuedPodInfos[pgKey(pgi)]
+		queuedPodInfos := rootPodGroupInfo.GetQueuedPodInfos(pgKey(pgi))
 		if len(podGroupResult.podResults) != len(queuedPodInfos) {
 			// This should never happen, but if it does, complete the result with the error status.
 			logger.Error(fmt.Errorf("some pods were not processed"), "scheduling error for pod group", "podGroup", klog.KObj(pgi))
