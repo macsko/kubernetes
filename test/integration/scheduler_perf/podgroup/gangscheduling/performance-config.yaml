@@ -80,3 +80,9 @@
       initNodes: 5000
       initPodGroups: 9
       podsPerGroup: 1000
+  - name: 5000Nodes_10Gangs_50000Pods_5000PerGroup
+    labels: [performance]
+    params:
+      initNodes: 5000
+      initPodGroups: 10
+      podsPerGroup: 5000
