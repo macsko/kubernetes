@@ -295,3 +295,12 @@ func CompositePodGroupPriority(cpg *schedulingv1alpha3.CompositePodGroup) int32 
 	// static default priority.
 	return 0
 }
+
+// PodPreemptionPolicy returns the PreemptionPolicy set in the pod, or the default policy
+// (PreemptLowerPriority) if not set.
+func PodPreemptionPolicy(pod *v1.Pod) v1.PreemptionPolicy {
+	if pod != nil && pod.Spec.PreemptionPolicy != nil {
+		return *pod.Spec.PreemptionPolicy
+	}
+	return v1.PreemptLowerPriority
+}

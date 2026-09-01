@@ -34,84 +34,34 @@ import (
 )
 
 type podGroupPreemptor struct {
-	priority          int32
-	pods              []*v1.Pod
-	podGroup          *schedulingv1beta1.PodGroup
-	compositePodGroup *schedulingv1alpha3.CompositePodGroup
-	preemptionPolicy  schedulingv1beta1.PreemptionPolicy
+	*framework.GenericPodGroup
+	pods             []*v1.Pod
+	preemptionPolicy v1.PreemptionPolicy
 }
 
 func newPodGroupPreemptor(pgInfo fwk.PodGroupInfo, enablePodGroupPreemptionPolicy bool) *podGroupPreemptor {
 	p := &podGroupPreemptor{
-		pods: pgInfo.GetUnscheduledPods(),
+		pods: pgInfo.GetAllUnscheduledPods(),
 	}
 	if pgInfo.GetCompositePodGroup() != nil {
-		cpg := pgInfo.GetCompositePodGroup()
-		p.compositePodGroup = cpg
-		p.priority = util.CompositePodGroupPriority(cpg)
-		p.preemptionPolicy = resolveCompositePreemptionPolicy(cpg, p.pods, enablePodGroupPreemptionPolicy)
+		p.GenericPodGroup = framework.NewGenericCompositePodGroup(pgInfo.GetCompositePodGroup())
 	} else {
-		pg := pgInfo.GetPodGroup()
-		p.podGroup = pg
-		p.priority = util.PodGroupPriority(pg)
-		p.preemptionPolicy = resolvePreemptionPolicy(pg, p.pods, enablePodGroupPreemptionPolicy)
+		p.GenericPodGroup = framework.NewGenericPodGroup(pgInfo.GetPodGroup())
 	}
+	p.preemptionPolicy = resolvePreemptionPolicy(pgInfo, p.pods, enablePodGroupPreemptionPolicy)
 	return p
 }
 
-func (p *podGroupPreemptor) getType() string {
-	if p.compositePodGroup != nil {
-		return string(fwk.CompositePodGroupKeyType)
-	}
-	return string(fwk.PodGroupKeyType)
-}
-
-func (p *podGroupPreemptor) getObj() klog.KMetadata {
-	if p.compositePodGroup != nil {
-		return p.compositePodGroup
-	}
-	return p.podGroup
-}
-
-func resolvePreemptionPolicy(pg *schedulingv1beta1.PodGroup, pods []*v1.Pod, enablePodGroupPreemptionPolicy bool) schedulingv1beta1.PreemptionPolicy {
+func resolvePreemptionPolicy(pgInfo fwk.PodGroupInfo, pods []*v1.Pod, enablePodGroupPreemptionPolicy bool) v1.PreemptionPolicy {
 	if enablePodGroupPreemptionPolicy {
-		// If the PodGroup was created with PodGroupPreemptionPolicy feature disabled, the PreemptionPolicy field will be nil.
-		// In this case the default policy value should be returned.
-		if pg.Spec.PreemptionPolicy != nil {
-			return *pg.Spec.PreemptionPolicy
-		}
-	} else {
-		for _, pod := range pods {
-			if p := pod.Spec.PreemptionPolicy; p != nil && *p == v1.PreemptNever {
-				return schedulingv1beta1.PreemptNever
-			}
+		return pgInfo.GetPreemptionPolicy()
+	}
+	for _, pod := range pods {
+		if p := pod.Spec.PreemptionPolicy; p != nil && *p == v1.PreemptNever {
+			return *p
 		}
 	}
-	return schedulingv1beta1.PreemptLowerPriority
-}
-
-func resolveCompositePreemptionPolicy(cpg *schedulingv1alpha3.CompositePodGroup, pods []*v1.Pod, enablePodGroupPreemptionPolicy bool) schedulingv1beta1.PreemptionPolicy {
-	if enablePodGroupPreemptionPolicy {
-		if cpg.Spec.PreemptionPolicy != nil {
-			if *cpg.Spec.PreemptionPolicy == schedulingv1alpha3.PreemptLowerPriority {
-				return schedulingv1beta1.PreemptLowerPriority
-			}
-			return schedulingv1beta1.PreemptNever
-		}
-	} else {
-		for _, pod := range pods {
-			if p := pod.Spec.PreemptionPolicy; p != nil && *p == v1.PreemptNever {
-				return schedulingv1beta1.PreemptNever
-			}
-		}
-	}
-	return schedulingv1beta1.PreemptLowerPriority
-}
-
-// Priority returns the scheduling priority of the preemptor.
-// This value is used to identify potential victims (which must have lower priority).
-func (p *podGroupPreemptor) Priority() int32 {
-	return p.priority
+	return v1.PreemptLowerPriority
 }
 
 // Members returns the list of Pods that belong to this preemptor.
@@ -119,18 +69,8 @@ func (p *podGroupPreemptor) Members() []*v1.Pod {
 	return p.pods
 }
 
-// PodGroup returns a pod group connected with this preemptor.
-func (p *podGroupPreemptor) PodGroup() *schedulingv1beta1.PodGroup {
-	return p.podGroup
-}
-
-// CompositePodGroup returns a composite pod group connected with this preemptor.
-func (p *podGroupPreemptor) CompositePodGroup() *schedulingv1alpha3.CompositePodGroup {
-	return p.compositePodGroup
-}
-
 // PreemptionPolicy returns a preemption policy of this preemptor.
-func (p *podGroupPreemptor) PreemptionPolicy() schedulingv1beta1.PreemptionPolicy {
+func (p *podGroupPreemptor) GetPreemptionPolicy() v1.PreemptionPolicy {
 	return p.preemptionPolicy
 }
 

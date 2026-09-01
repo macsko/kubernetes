@@ -30,6 +30,8 @@ import (
 	schedulingv1alpha3 "k8s.io/api/scheduling/v1alpha3"
 	schedulingv1beta1 "k8s.io/api/scheduling/v1beta1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -1109,6 +1111,20 @@ func (gpg *GenericPodGroup) GetCompositePodGroup() *schedulingv1alpha3.Composite
 	return gpg.CompositePodGroup
 }
 
+func (gpg *GenericPodGroup) GetObject() runtime.Object {
+	if gpg.PodGroup != nil {
+		return gpg.PodGroup
+	}
+	return gpg.CompositePodGroup
+}
+
+func (gpg *GenericPodGroup) GetUID() types.UID {
+	if gpg.PodGroup != nil {
+		return gpg.PodGroup.UID
+	}
+	return gpg.CompositePodGroup.UID
+}
+
 func (gpg *GenericPodGroup) GetName() string {
 	if gpg.PodGroup != nil {
 		return gpg.PodGroup.Name
@@ -1176,6 +1192,19 @@ func (gpg *GenericPodGroup) GetCreationTimestamp() time.Time {
 	return gpg.CompositePodGroup.CreationTimestamp.Time
 }
 
+// GetPreemptionPolicy returns the PreemptionPolicy set in the inner pod group or composite pod group,
+// or the default policy (PreemptLowerPriority) if not set.
+// It should be used only when the PodGroupPreemptionPolicy feature gate is enabled.
+func (gpg *GenericPodGroup) GetPreemptionPolicy() v1.PreemptionPolicy {
+	if pg := gpg.PodGroup; pg != nil && pg.Spec.PreemptionPolicy != nil {
+		return v1.PreemptionPolicy(*pg.Spec.PreemptionPolicy)
+	}
+	if cpg := gpg.CompositePodGroup; cpg != nil && cpg.Spec.PreemptionPolicy != nil {
+		return v1.PreemptionPolicy(*cpg.Spec.PreemptionPolicy)
+	}
+	return v1.PreemptLowerPriority
+}
+
 // PodGroupInfo enriches GenericPodGroup with information about pod group hierarchy.
 // For PodGroups, it contains a list of unscheduled pods.
 // For CompositePodGroups, it contains a list of children.
@@ -1192,16 +1221,16 @@ type PodGroupInfo struct {
 	Children []*PodGroupInfo
 }
 
-// GetUnscheduledPods returns the unscheduled pods for this pod group.
+// GetAllUnscheduledPods returns the unscheduled pods for this pod group.
 // For composite pod groups, this method recursively aggregates the unscheduled pods
 // from all leaf pod groups in the hierarchy.
-func (pgi *PodGroupInfo) GetUnscheduledPods() []*v1.Pod {
+func (pgi *PodGroupInfo) GetAllUnscheduledPods() []*v1.Pod {
 	if pgi.PodGroup != nil {
 		return pgi.UnscheduledPods
 	}
 	var pods []*v1.Pod
 	for _, child := range pgi.Children {
-		pods = append(pods, child.GetUnscheduledPods()...)
+		pods = append(pods, child.GetAllUnscheduledPods()...)
 	}
 	return pods
 }

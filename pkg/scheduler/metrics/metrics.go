@@ -103,6 +103,7 @@ const (
 const (
 	Pod      = "pod"
 	PodGroup = "podgroup"
+	CompositePodGroup = "compositepodgroup"
 )
 
 const (
