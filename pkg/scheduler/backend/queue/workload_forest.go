@@ -134,104 +134,75 @@ func (wf *workloadForest) getRootLookupInfo(gpg *fwk.GenericPodGroup) (*framewor
 	return wf.getRootLookupInfoForParentCPG(*storedGPG.GetParentCompositePodGroupName(), storedGPG.GetNamespace())
 }
 
-// parentKey returns the parent CompositePodGroup entity key for the given entity, if configured.
-func (wf *workloadForest) parentKey(key fwk.EntityKey) (fwk.EntityKey, bool) {
-	if !wf.isCompositePodGroupEnabled {
-		return fwk.EntityKey{}, false
-	}
-	if gpg := wf.podGroups[key]; gpg != nil {
-		return gpg.GetParentKey()
-	}
-	return fwk.EntityKey{}, false
-}
-
-// traverseAncestors traverses parent pointers upward starting from start.
-// It returns the sequence of visited keys, or an error if a cycle or depth exceeding WorkloadMaxTreeDepth is encountered.
-func (wf *workloadForest) traverseAncestors(start fwk.EntityKey) ([]fwk.EntityKey, error) {
-	path := []fwk.EntityKey{start}
-	visited := sets.New(start)
-
-	for {
-		if len(path) > schedulingv1alpha3.WorkloadMaxTreeDepth {
-			return path, fmt.Errorf("hierarchy depth of %d exceeds maximum allowed depth of %d (path: %s)", len(path), schedulingv1alpha3.WorkloadMaxTreeDepth, formatHierarchyPath(path))
-		}
-		parent, hasParent := wf.parentKey(path[len(path)-1])
-		if !hasParent {
-			return path, nil
-		}
-		path = append(path, parent)
-		if visited.Has(parent) {
-			return path, fmt.Errorf("cycle detected in composite pod group hierarchy: %s", formatHierarchyPath(path))
-		}
-		visited.Insert(parent)
-	}
-}
-
-// traverseSubtree visits all entities in the subtree rooted at root in BFS order.
-func (wf *workloadForest) traverseSubtree(root fwk.EntityKey, visitor func(key fwk.EntityKey)) {
-	queue := []fwk.EntityKey{root}
-	visited := sets.New(root)
-
-	for len(queue) > 0 {
-		curr := queue[0]
-		queue = queue[1:]
-
-		visitor(curr)
-
-		for child := range wf.children[curr] {
-			if !visited.Has(child) {
-				visited.Insert(child)
-				queue = append(queue, child)
-			}
-		}
-	}
-}
-
-// collectSubtree collects all reachable descendants (including seeds) in the subtree(s) rooted at seeds.
-func (wf *workloadForest) collectSubtree(seeds ...fwk.EntityKey) sets.Set[fwk.EntityKey] {
-	result := sets.New[fwk.EntityKey]()
-	for _, seed := range seeds {
-		wf.traverseSubtree(seed, func(key fwk.EntityKey) {
-			result.Insert(key)
-		})
-	}
-	return result
-}
-
 // getRootLookupInfoForParentCPG is a helper to traverse up the parent chain and return the lookup info of the root CompositePodGroup.
 // It should be called only when the CompositePodGroup feature gate is enabled.
 func (wf *workloadForest) getRootLookupInfoForParentCPG(parentName, namespace string) (*framework.QueuedPodGroupInfo, bool) {
-	cpgKey := fwk.CompositePodGroupKey(namespace, parentName)
-	path, err := wf.traverseAncestors(cpgKey)
-	if err != nil {
-		// TODO(jdzikowski): propagate logger to the getPod method in the scheduling queue.
-		utilruntime.HandleError(err)
-		return nil, false
+	currParentName := parentName
+	visited := sets.New[fwk.EntityKey]()
+	for {
+		cpgKey := fwk.CompositePodGroupKey(namespace, currParentName)
+		if visited.Has(cpgKey) {
+			// TODO(jdzikowski): propagate logger to the getPod method in the scheduling queue.
+			utilruntime.HandleError(fmt.Errorf("cycle detected in composite pod group hierarchy when getting root info: %s/%s", parentName, namespace))
+			return nil, false
+		}
+		visited.Insert(cpgKey)
+
+		cpg, exists := wf.podGroups[cpgKey]
+		if !exists {
+			return nil, false
+		}
+
+		if !cpg.HasParent() {
+			return newCompositePodGroupInfoForLookup(cpg.GetNamespace(), cpg.GetName()), true
+		}
+		currParentName = *cpg.GetParentCompositePodGroupName()
 	}
-	rootKey := path[len(path)-1]
-	gpg, exists := wf.podGroups[rootKey]
-	if !exists || gpg.HasParent() {
-		return nil, false
-	}
-	return newCompositePodGroupInfoForLookup(gpg.GetNamespace(), gpg.GetName()), true
 }
 
 // getLeafPodGroups returns all PodGroups that are leaf nodes in the subtree rooted at the given rootLookupInfo.
 func (wf *workloadForest) getLeafPodGroups(logger klog.Logger, rootLookupInfo *framework.QueuedPodGroupInfo) []*schedulingv1beta1.PodGroup {
-	rootKey := rootLookupInfo.GetKey()
+	key := rootLookupInfo.GetKey()
 	if rootLookupInfo.GetType() == fwk.PodGroupKeyType {
-		if gpg, exists := wf.podGroups[rootKey]; exists && gpg.PodGroup != nil {
-			return []*schedulingv1beta1.PodGroup{gpg.PodGroup}
+		gpg, exists := wf.podGroups[key]
+		if !exists {
+			return nil
 		}
-		return nil
+		return []*schedulingv1beta1.PodGroup{gpg.PodGroup}
 	}
 
 	var pgs []*schedulingv1beta1.PodGroup
-	wf.traverseSubtree(rootKey, func(key fwk.EntityKey) {
-		if gpg, isPG := wf.podGroups[key]; isPG && gpg.PodGroup != nil {
-			pgs = append(pgs, gpg.PodGroup)
+	queue := []fwk.EntityKey{key}
+	visited := sets.New[fwk.EntityKey]()
+
+	for len(queue) > 0 {
+		currKey := queue[0]
+		queue = queue[1:]
+
+		if visited.Has(currKey) {
+			utilruntime.HandleErrorWithLogger(logger, nil, "Cycle detected in composite pod group hierarchy when getting leaf PodGroups", "compositePodGroup", klog.KObj(rootLookupInfo))
+			return pgs
 		}
-	})
+		visited.Insert(currKey)
+
+		children, exists := wf.children[currKey]
+		if !exists {
+			continue
+		}
+
+		for childKey := range children {
+			gpg, ok := wf.podGroups[childKey]
+			if !ok {
+				continue
+			}
+			if gpg.PodGroup != nil {
+				pgs = append(pgs, gpg.PodGroup)
+			} else if gpg.CompositePodGroup != nil {
+				queue = append(queue, childKey)
+			}
+		}
+	}
+
 	return pgs
 }
 
@@ -291,12 +262,55 @@ func (wf *workloadForest) validateAllHierarchies() []*invalidHierarchyRecord {
 		if invalidEntities.Has(key) {
 			continue
 		}
-		path, err := wf.traverseAncestors(key)
+
+		path := []fwk.EntityKey{key}
+		visited := sets.New(key)
+		var err error
+		var rootKey fwk.EntityKey
+
+		for {
+			if len(path) > schedulingv1alpha3.WorkloadMaxTreeDepth {
+				err = fmt.Errorf("hierarchy depth of %d exceeds maximum allowed depth of %d (path: %s)", len(path), schedulingv1alpha3.WorkloadMaxTreeDepth, formatHierarchyPath(path))
+				rootKey = path[len(path)-1]
+				break
+			}
+
+			curr := wf.podGroups[path[len(path)-1]]
+			if curr == nil || !wf.isCompositePodGroupEnabled {
+				break
+			}
+			parent, hasParent := curr.GetParentKey()
+			if !hasParent {
+				break
+			}
+
+			path = append(path, parent)
+			if visited.Has(parent) {
+				err = fmt.Errorf("cycle detected in composite pod group hierarchy: %s", formatHierarchyPath(path))
+				rootKey = parent
+				break
+			}
+			visited.Insert(parent)
+		}
+
 		if err != nil {
-			allMembers := wf.collectSubtree(path...)
+			allMembers := sets.New[fwk.EntityKey]()
+			queue := []fwk.EntityKey{rootKey}
+			for len(queue) > 0 {
+				curr := queue[0]
+				queue = queue[1:]
+				if allMembers.Has(curr) {
+					continue
+				}
+				allMembers.Insert(curr)
+				for child := range wf.children[curr] {
+					queue = append(queue, child)
+				}
+			}
+
 			invalidEntities = invalidEntities.Union(allMembers)
 			invalidHierarchies = append(invalidHierarchies, &invalidHierarchyRecord{
-				rootKey:    path[len(path)-1],
+				rootKey:    rootKey,
 				reason:     schedulingapi.PodGroupReasonInvalid,
 				message:    err.Error(),
 				memberKeys: allMembers,
