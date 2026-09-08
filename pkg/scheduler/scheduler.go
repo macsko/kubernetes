@@ -345,6 +345,7 @@ func New(ctx context.Context,
 		internalqueue.WithMetricsRecorder(comps.metricsRecorder),
 		internalqueue.WithAPIDispatcher(comps.apiDispatcher),
 		internalqueue.WithPodSigners(podSigners),
+		internalqueue.WithClient(client),
 	)
 
 	schedulerCache := comps.GetCache()

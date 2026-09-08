@@ -1198,3 +1198,141 @@ func TestWorkloadForest_BuildPodGroupInfoForCPG(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkloadForest_ValidateAllHierarchies(t *testing.T) {
+	tests := []struct {
+		name             string
+		podGroups        []*schedulingv1beta1.PodGroup
+		compositeGroups  []*schedulingv1alpha3.CompositePodGroup
+		wantInvalidCount int
+		wantTaintedKeys  sets.Set[fwk.EntityKey]
+		latePodGroups    []*schedulingv1beta1.PodGroup
+		lateCompositePGs []*schedulingv1alpha3.CompositePodGroup
+		wantLateTainted  sets.Set[fwk.EntityKey]
+	}{
+		{
+			name: "valid hierarchy (depth <= 4)",
+			compositeGroups: []*schedulingv1alpha3.CompositePodGroup{
+				st.MakeCompositePodGroup().Name("root").Namespace("ns1").Obj(),
+				st.MakeCompositePodGroup().Name("mid").Namespace("ns1").ParentCompositePodGroup("root").Obj(),
+			},
+			podGroups: []*schedulingv1beta1.PodGroup{
+				st.MakePodGroup().Name("leaf").Namespace("ns1").ParentCompositePodGroup("mid").Obj(),
+			},
+			wantInvalidCount: 0,
+			wantTaintedKeys:  sets.New[fwk.EntityKey](),
+		},
+		{
+			name: "hierarchy exceeds max depth of 4 (5 levels)",
+			compositeGroups: []*schedulingv1alpha3.CompositePodGroup{
+				st.MakeCompositePodGroup().Name("lvl1").Namespace("ns1").Obj(),
+				st.MakeCompositePodGroup().Name("lvl2").Namespace("ns1").ParentCompositePodGroup("lvl1").Obj(),
+				st.MakeCompositePodGroup().Name("lvl3").Namespace("ns1").ParentCompositePodGroup("lvl2").Obj(),
+				st.MakeCompositePodGroup().Name("lvl4").Namespace("ns1").ParentCompositePodGroup("lvl3").Obj(),
+			},
+			podGroups: []*schedulingv1beta1.PodGroup{
+				st.MakePodGroup().Name("lvl5").Namespace("ns1").ParentCompositePodGroup("lvl4").Obj(),
+			},
+			wantInvalidCount: 1,
+			wantTaintedKeys: sets.New[fwk.EntityKey](
+				fwk.CompositePodGroupKey("ns1", "lvl1"),
+				fwk.CompositePodGroupKey("ns1", "lvl2"),
+				fwk.CompositePodGroupKey("ns1", "lvl3"),
+				fwk.CompositePodGroupKey("ns1", "lvl4"),
+				fwk.PodGroupKey("ns1", "lvl5"),
+			),
+		},
+		{
+			name: "cyclic parent references in composite pod groups",
+			compositeGroups: []*schedulingv1alpha3.CompositePodGroup{
+				st.MakeCompositePodGroup().Name("cpg1").Namespace("ns1").ParentCompositePodGroup("cpg2").Obj(),
+				st.MakeCompositePodGroup().Name("cpg2").Namespace("ns1").ParentCompositePodGroup("cpg1").Obj(),
+			},
+			podGroups: []*schedulingv1beta1.PodGroup{
+				st.MakePodGroup().Name("pg1").Namespace("ns1").ParentCompositePodGroup("cpg1").Obj(),
+			},
+			wantInvalidCount: 1,
+			wantTaintedKeys: sets.New[fwk.EntityKey](
+				fwk.CompositePodGroupKey("ns1", "cpg1"),
+				fwk.CompositePodGroupKey("ns1", "cpg2"),
+				fwk.PodGroupKey("ns1", "pg1"),
+			),
+		},
+		{
+			name: "late arriving child attached to invalid cyclic parent is detected on next validation run",
+			compositeGroups: []*schedulingv1alpha3.CompositePodGroup{
+				st.MakeCompositePodGroup().Name("cpg1").Namespace("ns1").ParentCompositePodGroup("cpg2").Obj(),
+				st.MakeCompositePodGroup().Name("cpg2").Namespace("ns1").ParentCompositePodGroup("cpg1").Obj(),
+			},
+			podGroups: []*schedulingv1beta1.PodGroup{
+				st.MakePodGroup().Name("pg1").Namespace("ns1").ParentCompositePodGroup("cpg1").Obj(),
+			},
+			wantInvalidCount: 1,
+			wantTaintedKeys: sets.New[fwk.EntityKey](
+				fwk.CompositePodGroupKey("ns1", "cpg1"),
+				fwk.CompositePodGroupKey("ns1", "cpg2"),
+				fwk.PodGroupKey("ns1", "pg1"),
+			),
+			latePodGroups: []*schedulingv1beta1.PodGroup{
+				st.MakePodGroup().Name("lateChild").Namespace("ns1").ParentCompositePodGroup("cpg2").Obj(),
+			},
+			lateCompositePGs: []*schedulingv1alpha3.CompositePodGroup{
+				st.MakeCompositePodGroup().Name("lateCPG").Namespace("ns1").ParentCompositePodGroup("cpg1").Obj(),
+			},
+			wantLateTainted: sets.New[fwk.EntityKey](
+				fwk.CompositePodGroupKey("ns1", "cpg1"),
+				fwk.CompositePodGroupKey("ns1", "cpg2"),
+				fwk.PodGroupKey("ns1", "pg1"),
+				fwk.PodGroupKey("ns1", "lateChild"),
+				fwk.CompositePodGroupKey("ns1", "lateCPG"),
+			),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wf := newWorkloadForest(true)
+			for _, cpg := range tt.compositeGroups {
+				wf.addGenericPodGroup(fwk.NewGenericCompositePodGroup(cpg))
+			}
+			for _, pg := range tt.podGroups {
+				wf.addGenericPodGroup(fwk.NewGenericPodGroup(pg))
+			}
+
+			newlyInvalid := wf.validateAllHierarchies()
+
+			if len(newlyInvalid) != tt.wantInvalidCount {
+				t.Fatalf("validateAllHierarchies() returned %d records, want %d", len(newlyInvalid), tt.wantInvalidCount)
+			}
+
+			allInvalid := sets.New[fwk.EntityKey]()
+			for _, record := range newlyInvalid {
+				allInvalid = allInvalid.Union(record.memberKeys)
+			}
+
+			if diff := cmp.Diff(tt.wantTaintedKeys, allInvalid); diff != "" {
+				t.Errorf("Unexpected invalid entities (-want,+got):\n%s", diff)
+			}
+
+			// Add late arriving entities and verify they are detected on next validation run
+			if len(tt.latePodGroups) > 0 || len(tt.lateCompositePGs) > 0 {
+				for _, latePG := range tt.latePodGroups {
+					wf.addGenericPodGroup(fwk.NewGenericPodGroup(latePG))
+				}
+				for _, lateCPG := range tt.lateCompositePGs {
+					wf.addGenericPodGroup(fwk.NewGenericCompositePodGroup(lateCPG))
+				}
+
+				lateInvalid := wf.validateAllHierarchies()
+				allLateInvalid := sets.New[fwk.EntityKey]()
+				for _, record := range lateInvalid {
+					allLateInvalid = allLateInvalid.Union(record.memberKeys)
+				}
+
+				if diff := cmp.Diff(tt.wantLateTainted, allLateInvalid); diff != "" {
+					t.Errorf("Unexpected invalid entities after late additions (-want,+got):\n%s", diff)
+				}
+			}
+		})
+	}
+}

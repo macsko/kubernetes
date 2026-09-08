@@ -656,6 +656,9 @@ const (
 	// SchedulerError reason in the PodGroupInitiallyScheduled condition means that some internal error happens
 	// during scheduling, for example due to nodeAffinity parsing errors.
 	PodGroupReasonSchedulerError string = "SchedulerError"
+	// Invalid reason in the PodGroupInitiallyScheduled condition indicates that the PodGroup
+	// has an invalid hierarchy configuration.
+	PodGroupReasonInvalid string = "Invalid"
 	// PreemptionByScheduler reason in the DisruptionTarget condition indicates the PodGroup was preempted
 	// to make room for higher-priority PodGroups or Pods.
 	PodGroupReasonPreemptionByScheduler string = "PreemptionByScheduler"
@@ -942,3 +945,20 @@ type CompositePodGroupSchedulingConstraints struct {
 	// +listType=atomic
 	Topology []TopologyConstraint
 }
+
+// Well-known condition types for CompositePodGroups.
+const (
+	// CompositePodGroupInitiallyScheduled represents status of the scheduling process for this CompositePodGroup till first success.
+	CompositePodGroupInitiallyScheduled string = "CompositePodGroupInitiallyScheduled"
+)
+
+// Well-known condition reasons for CompositePodGroups.
+const (
+	// CompositePodGroupReasonUnschedulable reason in the CompositePodGroupInitiallyScheduled condition indicates that the CompositePodGroup cannot be scheduled.
+	CompositePodGroupReasonUnschedulable string = "Unschedulable"
+	// CompositePodGroupReasonSchedulerError reason in the CompositePodGroupInitiallyScheduled condition indicates that an internal error occurred during scheduling.
+	CompositePodGroupReasonSchedulerError string = "SchedulerError"
+	// CompositePodGroupReasonInvalid reason in the CompositePodGroupInitiallyScheduled condition indicates that the CompositePodGroup
+	// has an invalid hierarchy configuration.
+	CompositePodGroupReasonInvalid string = "Invalid"
+)

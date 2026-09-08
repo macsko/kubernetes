@@ -36,6 +36,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	schedulingv1alpha3 "k8s.io/api/scheduling/v1alpha3"
 	schedulingv1beta1 "k8s.io/api/scheduling/v1beta1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -43,6 +44,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
+	clientset "k8s.io/client-go/kubernetes"
 	listersv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/component-helpers/resource"
 	"k8s.io/klog/v2"
@@ -260,6 +262,8 @@ type PriorityQueue struct {
 	isInPlacePodVerticalScalingSchedulerPreemptionEnabled bool
 	// isPreQueueingHintsEnabled indicates whether the SchedulerPreQueueingHints feature gate is enabled.
 	isPreQueueingHintsEnabled bool
+
+	client clientset.Interface
 }
 
 // QueueingHintFunction is the wrapper of QueueingHintFn that has PluginName.
@@ -290,6 +294,7 @@ type priorityQueueOptions struct {
 	queueingHintMap                   QueueingHintMapPerProfile
 	apiDispatcher                     fwk.APIDispatcher
 	podSigners                        map[string]PodSigner
+	client                            clientset.Interface
 }
 
 // Option configures a PriorityQueue
@@ -381,6 +386,13 @@ func WithPodSigners(signers map[string]PodSigner) Option {
 	}
 }
 
+// WithClient sets the Kubernetes client for PriorityQueue to communicate status updates.
+func WithClient(client clientset.Interface) Option {
+	return func(o *priorityQueueOptions) {
+		o.client = client
+	}
+}
+
 var defaultPriorityQueueOptions = priorityQueueOptions{
 	clock:                             clock.RealClock{},
 	podInitialBackoffDuration:         DefaultPodInitialBackoffDuration,
@@ -457,6 +469,7 @@ func NewPriorityQueue(
 		pluginMetricsSamplePercent:        options.pluginMetricsSamplePercent,
 		apiDispatcher:                     options.apiDispatcher,
 		podSigners:                        options.podSigners,
+		client:                            options.client,
 		isPopFromBackoffQEnabled:          isPopFromBackoffQEnabled,
 		isGenericWorkloadEnabled:          isGenericWorkloadEnabled,
 		isOpportunisticBatchingEnabled:    isOpportunisticBatchingEnabled,
@@ -504,6 +517,11 @@ func (p *PriorityQueue) Run(logger klog.Logger) {
 	go wait.Until(func() {
 		p.flushUnschedulableEntitiesLeftover(logger)
 	}, 30*time.Second, p.stop)
+	if p.isGenericWorkloadEnabled {
+		go wait.Until(func() {
+			p.validateAndFlushInvalidHierarchies(logger)
+		}, 15*time.Second, p.stop)
+	}
 }
 
 // queueingStrategy indicates how the scheduling queue should enqueue the Pod from unschedulable pod pool.
@@ -900,7 +918,7 @@ func (p *PriorityQueue) addPod(ctx context.Context, pod *v1.Pod) {
 func (p *PriorityQueue) addPodGroupMember(logger klog.Logger, pInfo *framework.QueuedPodInfo) {
 	rootInfoLookup, hasRoot := p.workloadForest.getRootLookupInfoForPod(pInfo.Pod)
 	if !hasRoot {
-		// If the PodGroup object cannot be fetched, the pod cannot be scheduled.
+		// If the PodGroup object cannot be fetched or hierarchy is invalid, the pod cannot be scheduled.
 		// It should be put into incompletePodGroupPods waiting for the pod group to be observed.
 		p.incompletePodGroupPods.add(pInfo)
 		logger.V(5).Info("Pod with pod group added to incompletePodGroupPods, waiting for one or more parent pod group objects to be observed", "podGroup", pInfo.Pod.Spec.SchedulingGroup.PodGroupName, "pod", klog.KObj(pInfo))
@@ -1575,7 +1593,7 @@ func (p *PriorityQueue) AddGenericPodGroup(logger klog.Logger, gpg *fwk.GenericP
 
 	rootInfoLookup, hasRoot := p.workloadForest.getRootLookupInfo(gpg)
 	if !hasRoot {
-		// If the root does not exist, then pods should stay in the incompletePodGroupPods.
+		// If the root does not exist or hierarchy is invalid, then pods should stay in the incompletePodGroupPods.
 		return
 	}
 
@@ -2215,5 +2233,126 @@ func newCompositePodGroupInfoForLookup(namespace, name string) *framework.Queued
 				},
 			}),
 		},
+	}
+}
+
+// validateAndFlushInvalidHierarchies performs runtime hierarchy validation across the workload forest,
+// moves any queued pods of invalid hierarchies to incompletePodGroupPods, and publishes invalid status conditions.
+func (p *PriorityQueue) validateAndFlushInvalidHierarchies(logger klog.Logger) {
+	type statusTarget struct {
+		key     fwk.EntityKey
+		reason  string
+		message string
+	}
+
+	var statusTargets []statusTarget
+
+	p.lock.Lock()
+	newlyInvalid := p.workloadForest.validateAllHierarchies()
+	if len(newlyInvalid) == 0 {
+		p.lock.Unlock()
+		return
+	}
+
+	for _, record := range newlyInvalid {
+		// If root entity was queued, remove it from activeQ/backoffQ/unschedulableEntities
+		// and move its pods to incompletePodGroupPods.
+		if entity, _ := p.deleteFromAnyQueue(newQueuedEntityInfoForLookup(record.rootKey)); entity != nil {
+			for pInfo := range entity.ForEachPodInfo() {
+				p.incompletePodGroupPods.add(pInfo)
+			}
+		}
+
+		// Move any pending pods waiting for this group to incompletePodGroupPods.
+		for memberKey := range record.memberKeys {
+			if memberKey.Type == fwk.PodGroupKeyType {
+				for _, pInfo := range p.pendingPodGroupPods.clear(memberKey.Namespace, memberKey.Name) {
+					p.incompletePodGroupPods.add(pInfo)
+				}
+			}
+			statusTargets = append(statusTargets, statusTarget{
+				key:     memberKey,
+				reason:  record.reason,
+				message: record.message,
+			})
+		}
+	}
+	p.lock.Unlock()
+
+	if p.client != nil {
+		ctx := context.Background()
+		for _, target := range statusTargets {
+			p.patchInvalidStatus(ctx, logger, target.key, target.reason, target.message)
+		}
+	}
+}
+
+func (p *PriorityQueue) patchInvalidStatus(ctx context.Context, logger klog.Logger, key fwk.EntityKey, reason, message string) {
+	if p.client == nil {
+		return
+	}
+
+	condition := metav1.Condition{
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            message,
+		LastTransitionTime: metav1.Now(),
+	}
+
+	var pg *schedulingv1beta1.PodGroup
+	var cpg *schedulingv1alpha3.CompositePodGroup
+	p.lock.RLock()
+	gpg, ok := p.workloadForest.getByEntityKey(key)
+	if !ok {
+
+	}
+	switch key.Type {
+	case fwk.PodGroupKeyType:
+		pg = gpg.GetPodGroup().DeepCopy()
+	case fwk.CompositePodGroupKeyType:
+		cpg = gpg.GetCompositePodGroup().DeepCopy()
+	}
+	p.lock.RUnlock()
+
+	if pg != nil {
+		condition.Type = schedulingv1beta1.PodGroupInitiallyScheduled
+		condition.ObservedGeneration = pg.Generation
+		newStatus := pg.Status.DeepCopy()
+		if apimeta.SetStatusCondition(&newStatus.Conditions, condition) {
+			if err := util.PatchPodGroupStatus(ctx, p.client, pg.Name, pg.Namespace, &pg.Status, newStatus); err != nil {
+				utilruntime.HandleErrorWithLogger(logger, err, "Failed to patch invalid status on PodGroup", "podGroup", klog.KObj(pg))
+			}
+		}
+	} else if cpg != nil {
+		condition.Type = schedulingv1alpha3.CompositePodGroupInitiallyScheduled
+		condition.ObservedGeneration = cpg.Generation
+		newStatus := cpg.Status.DeepCopy()
+		if apimeta.SetStatusCondition(&newStatus.Conditions, condition) {
+			if err := util.PatchCompositePodGroupStatus(ctx, p.client, cpg.Name, cpg.Namespace, &cpg.Status, newStatus); err != nil {
+				utilruntime.HandleErrorWithLogger(logger, err, "Failed to patch invalid status on CompositePodGroup", "compositePodGroup", klog.KObj(cpg))
+			}
+		}
+	}
+}
+
+func newQueuedEntityInfoForLookup(key fwk.EntityKey) framework.QueuedEntityInfo {
+	switch key.Type {
+	case fwk.PodKeyType:
+		return &framework.QueuedPodInfo{
+			PodInfo: &framework.PodInfo{
+				Pod: &v1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: key.Namespace,
+						Name:      key.Name,
+					},
+				},
+			},
+		}
+	case fwk.PodGroupKeyType:
+		return newPodGroupInfoForLookup(key.Namespace, key.Name)
+	case fwk.CompositePodGroupKeyType:
+		return newCompositePodGroupInfoForLookup(key.Namespace, key.Name)
+	default:
+		return nil
 	}
 }
