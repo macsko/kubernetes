@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	fwk "k8s.io/kube-scheduler/framework"
+	schedulingapi "k8s.io/kubernetes/pkg/apis/scheduling"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
@@ -99,6 +100,12 @@ func (wf *workloadForest) deleteGenericPodGroup(gpg *fwk.GenericPodGroup) {
 	if parentChildren.Len() == 0 {
 		delete(wf.children, parentKey)
 	}
+}
+
+// getByEntityKey returns the GenericPodGroup for a given entity key.
+func (wf *workloadForest) getByEntityKey(key fwk.EntityKey) (*fwk.GenericPodGroup, bool) {
+	gpg, ok := wf.podGroups[key]
+	return gpg, ok
 }
 
 // getRootLookupInfoForPod returns the lookup info of the current root PodGroup or CompositePodGroup for a given pod.
@@ -274,10 +281,44 @@ func (wf *workloadForest) buildQueuedPodGroupInfo(logger klog.Logger, rootLookup
 	}
 }
 
+// validateAllHierarchies inspects all trees and subtrees in the forest for invalid configurations.
+// It checks only for cyclic parent references and max depth violations (depth <= 4).
+func (wf *workloadForest) validateAllHierarchies() []*invalidHierarchyRecord {
+	var invalidHierarchies []*invalidHierarchyRecord
+	invalidEntities := sets.New[fwk.EntityKey]()
+
+	for key := range wf.podGroups {
+		if invalidEntities.Has(key) {
+			continue
+		}
+		path, err := wf.traverseAncestors(key)
+		if err != nil {
+			allMembers := wf.collectSubtree(path...)
+			invalidEntities = invalidEntities.Union(allMembers)
+			invalidHierarchies = append(invalidHierarchies, &invalidHierarchyRecord{
+				rootKey:    path[len(path)-1],
+				reason:     schedulingapi.PodGroupReasonInvalid,
+				message:    err.Error(),
+				memberKeys: allMembers,
+			})
+		}
+	}
+
+	return invalidHierarchies
+}
+
 func formatHierarchyPath(path []fwk.EntityKey) string {
 	parts := make([]string, len(path))
 	for i, k := range path {
 		parts[i] = k.String()
 	}
 	return strings.Join(parts, " -> ")
+}
+
+// invalidHierarchyRecord tracks an invalid hierarchy and all its member entities.
+type invalidHierarchyRecord struct {
+	rootKey    fwk.EntityKey
+	reason     string
+	message    string
+	memberKeys sets.Set[fwk.EntityKey]
 }

@@ -10649,3 +10649,134 @@ func TestPreQueueingHint_PerPluginNarrowing(t *testing.T) {
 		t.Errorf("pluginB QueueingHintFn should be called for pod2, called for: %v", pluginBQueueingHintCalled)
 	}
 }
+func TestPriorityQueue_ValidateAndFlushInvalidHierarchies(t *testing.T) {
+	featuregatetesting.SetFeatureGatesDuringTest(t, utilfeature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
+		features.GenericWorkload:                 true,
+		features.TopologyAwareWorkloadScheduling: true,
+		features.CompositePodGroup:               true,
+	})
+
+	t.Run("excessive depth hierarchy evicts queue, keeps pods in incomplete, and patches status", func(t *testing.T) {
+		logger, ctx := ktesting.NewTestContext(t)
+
+		lvl1 := st.MakeCompositePodGroup().Name("lvl1").Namespace("ns1").Obj()
+		lvl2 := st.MakeCompositePodGroup().Name("lvl2").Namespace("ns1").ParentCompositePodGroup("lvl1").Obj()
+		lvl3 := st.MakeCompositePodGroup().Name("lvl3").Namespace("ns1").ParentCompositePodGroup("lvl2").Obj()
+		lvl4 := st.MakeCompositePodGroup().Name("lvl4").Namespace("ns1").ParentCompositePodGroup("lvl3").Obj()
+		lvl5 := st.MakePodGroup().Name("lvl5").Namespace("ns1").ParentCompositePodGroup("lvl4").Obj()
+		pod1 := st.MakePod().Name("p1").Namespace("ns1").UID("uid1").PodGroupName("lvl5").Obj()
+
+		client := fake.NewClientset(lvl1, lvl2, lvl3, lvl4, lvl5, pod1)
+		q := NewTestQueue(ctx, newDefaultQueueSort(), WithClient(client))
+		defer q.Close()
+
+		q.AddGenericPodGroup(logger, fwk.NewGenericCompositePodGroup(lvl1))
+		q.AddGenericPodGroup(logger, fwk.NewGenericCompositePodGroup(lvl2))
+		q.AddGenericPodGroup(logger, fwk.NewGenericCompositePodGroup(lvl3))
+		q.AddGenericPodGroup(logger, fwk.NewGenericCompositePodGroup(lvl4))
+		q.AddGenericPodGroup(logger, fwk.NewGenericPodGroup(lvl5))
+		q.Add(ctx, pod1)
+
+		// Before validation, root is in active queue
+		if len(getActivePodGroups(q)) != 1 {
+			t.Fatalf("Expected 1 active pod group before validation, got: %v", getActivePodGroups(q))
+		}
+
+		// Run hierarchy validation sweep
+		q.validateAndFlushInvalidHierarchies(logger)
+
+		// After validation, active queue should be empty and pod should be preserved in incompletePodGroupPods
+		if len(getActivePodGroups(q)) != 0 {
+			t.Errorf("Expected 0 active pod groups after validation, got: %v", getActivePodGroups(q))
+		}
+		if len(q.IncompletePodGroupPodsPods()) != 1 {
+			t.Errorf("Expected 1 incomplete pod, got: %v", len(q.IncompletePodGroupPodsPods()))
+		}
+
+		// Verify API status conditions were updated
+		updatedCPG, err := client.SchedulingV1alpha3().CompositePodGroups("ns1").Get(ctx, "lvl1", metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("Failed to get updated CPG: %v", err)
+		}
+		var foundCPGCond bool
+		for _, c := range updatedCPG.Status.Conditions {
+			if c.Type == schedulingv1alpha3.CompositePodGroupInitiallyScheduled && c.Status == metav1.ConditionFalse && c.Reason == "Invalid" {
+				foundCPGCond = true
+				break
+			}
+		}
+		if !foundCPGCond {
+			t.Errorf("Expected Invalid condition on CompositePodGroup, got: %+v", updatedCPG.Status.Conditions)
+		}
+
+		updatedPG, err := client.SchedulingV1beta1().PodGroups("ns1").Get(ctx, "lvl5", metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("Failed to get updated PodGroup: %v", err)
+		}
+		var foundPGCond bool
+		for _, c := range updatedPG.Status.Conditions {
+			if c.Type == schedulingv1beta1.PodGroupInitiallyScheduled && c.Status == metav1.ConditionFalse && c.Reason == "Invalid" {
+				foundPGCond = true
+				break
+			}
+		}
+		if !foundPGCond {
+			t.Errorf("Expected Invalid condition on PodGroup, got: %+v", updatedPG.Status.Conditions)
+		}
+
+		// Add a late-arriving pod for this invalid group and run sweep
+		latePod := st.MakePod().Name("late-pod").Namespace("ns1").UID("uid-late").PodGroupName("lvl5").Obj()
+		q.Add(ctx, latePod)
+		q.validateAndFlushInvalidHierarchies(logger)
+
+		if len(getActivePodGroups(q)) != 0 {
+			t.Errorf("Expected 0 active pod groups after late pod add, got: %v", getActivePodGroups(q))
+		}
+		if len(q.IncompletePodGroupPodsPods()) != 2 {
+			t.Errorf("Expected 2 incomplete pods after late pod add, got: %v", len(q.IncompletePodGroupPodsPods()))
+		}
+	})
+
+	t.Run("cyclic hierarchy evicts queue and patches status on all members while keeping pods in incomplete", func(t *testing.T) {
+		logger, ctx := ktesting.NewTestContext(t)
+
+		cpg1 := st.MakeCompositePodGroup().Name("cpg1").Namespace("ns1").ParentCompositePodGroup("cpg2").Obj()
+		cpg2 := st.MakeCompositePodGroup().Name("cpg2").Namespace("ns1").ParentCompositePodGroup("cpg1").Obj()
+		pg1 := st.MakePodGroup().Name("pg1").Namespace("ns1").ParentCompositePodGroup("cpg1").Obj()
+		pod1 := st.MakePod().Name("p1").Namespace("ns1").UID("uid1").PodGroupName("pg1").Obj()
+
+		client := fake.NewClientset(cpg1, cpg2, pg1, pod1)
+		q := NewTestQueue(ctx, newDefaultQueueSort(), WithClient(client))
+		defer q.Close()
+
+		q.AddGenericPodGroup(logger, fwk.NewGenericCompositePodGroup(cpg1))
+		q.AddGenericPodGroup(logger, fwk.NewGenericCompositePodGroup(cpg2))
+		q.AddGenericPodGroup(logger, fwk.NewGenericPodGroup(pg1))
+		q.Add(ctx, pod1)
+
+		q.validateAndFlushInvalidHierarchies(logger)
+
+		if len(getActivePodGroups(q)) != 0 {
+			t.Errorf("Expected 0 active pod groups after validation, got: %v", getActivePodGroups(q))
+		}
+		if len(q.IncompletePodGroupPodsPods()) != 1 {
+			t.Errorf("Expected 1 incomplete pod after validation, got: %v", len(q.IncompletePodGroupPodsPods()))
+		}
+
+		updatedCPG1, err := client.SchedulingV1alpha3().CompositePodGroups("ns1").Get(ctx, "cpg1", metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("Failed to get updated CPG1: %v", err)
+		}
+		if len(updatedCPG1.Status.Conditions) == 0 || updatedCPG1.Status.Conditions[0].Reason != "Invalid" {
+			t.Errorf("Expected Invalid condition on CPG1, got: %+v", updatedCPG1.Status.Conditions)
+		}
+
+		updatedPG1, err := client.SchedulingV1beta1().PodGroups("ns1").Get(ctx, "pg1", metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("Failed to get updated PG1: %v", err)
+		}
+		if len(updatedPG1.Status.Conditions) == 0 || updatedPG1.Status.Conditions[0].Reason != "Invalid" {
+			t.Errorf("Expected Invalid condition on PG1, got: %+v", updatedPG1.Status.Conditions)
+		}
+	})
+}

@@ -780,6 +780,9 @@ const (
 	// SchedulerError reason in the PodGroupInitiallyScheduled condition means that some internal error happens
 	// during scheduling, for example due to nodeAffinity parsing errors.
 	PodGroupReasonSchedulerError string = "SchedulerError"
+	// PodGroupReasonInvalid reason in the PodGroupInitiallyScheduled condition indicates that the PodGroup
+	// has an invalid hierarchy configuration.
+	PodGroupReasonInvalid string = "Invalid"
 	// PreemptionByScheduler reason in the DisruptionTarget condition indicates the PodGroup was preempted
 	// to make room for higher-priority PodGroups or Pods.
 	PodGroupReasonPreemptionByScheduler string = "PreemptionByScheduler"
