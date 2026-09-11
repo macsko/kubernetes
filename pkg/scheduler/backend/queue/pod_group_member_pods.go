@@ -17,6 +17,8 @@ limitations under the License.
 package queue
 
 import (
+	"iter"
+
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/component-base/metrics"
 	fwk "k8s.io/kube-scheduler/framework"
@@ -107,15 +109,15 @@ func (p *podGroupMemberPods) list() []*v1.Pod {
 	return pods
 }
 
-// listPodInfos returns all tracked queued pod infos.
-func (p *podGroupMemberPods) listPodInfos() []*framework.QueuedPodInfo {
-	var pInfos []*framework.QueuedPodInfo
-	for _, pgPods := range p.podGroupToPodInfos {
-		for _, pInfo := range pgPods {
-			pInfos = append(pInfos, pInfo)
+// forPodGroupPodInfos returns an iterator over all tracked queued pod infos.
+func (p *podGroupMemberPods) forPodGroupPodInfos() iter.Seq2[fwk.EntityKey, map[fwk.EntityKey]*framework.QueuedPodInfo] {
+	return iter.Seq2[fwk.EntityKey, map[fwk.EntityKey]*framework.QueuedPodInfo](func(yield func(fwk.EntityKey, map[fwk.EntityKey]*framework.QueuedPodInfo) bool) {
+		for pgKey, pgPods := range p.podGroupToPodInfos {
+			if !yield(pgKey, pgPods) {
+				return
+			}
 		}
-	}
-	return pInfos
+	})
 }
 
 // clear removes and returns all pod infos for a specific pod group namespace and name.

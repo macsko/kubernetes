@@ -3874,8 +3874,30 @@ func TestValidateIncompletePodGroupPods(t *testing.T) {
 			stepDuration:        6 * time.Minute,
 			wantCondition:       true,
 			wantConditionReason: v1.PodReasonUnschedulable,
-			wantConditionSubMsg: "compositepodgroup/default/cpg-missing not found in workload forest",
+			wantConditionSubMsg: "compositepodgroup/default/cpg-missing does not exist",
 			wantApiActionsCount: 2,
+			wantIncomplete:      true,
+			wantActiveQLen:      0,
+		},
+		{
+			name: "groups of the broken hierarchy without stuck pods are patched too",
+			pods: []*v1.Pod{
+				st.MakePod().Namespace("default").Name("p1").UID("p1").PodGroupName("pg1").Obj(),
+			},
+			initialCPGs: []*schedulingv1alpha3.CompositePodGroup{
+				st.MakeCompositePodGroup().Namespace("default").Name("cpg1").ParentCompositePodGroup("cpg2").Obj(),
+				st.MakeCompositePodGroup().Namespace("default").Name("cpg2").ParentCompositePodGroup("cpg1").Obj(),
+			},
+			initialPodGroups: []*schedulingv1beta1.PodGroup{
+				st.MakePodGroup().Namespace("default").Name("pg1").ParentCompositePodGroup("cpg1").Obj(),
+				// pg2 has no pods waiting in incompletePodGroupPods, but shares the cyclic hierarchy.
+				st.MakePodGroup().Namespace("default").Name("pg2").ParentCompositePodGroup("cpg2").Obj(),
+			},
+			stepDuration:        6 * time.Minute,
+			wantCondition:       true,
+			wantConditionReason: v1.PodReasonUnschedulable,
+			wantConditionSubMsg: "cycle detected in hierarchy",
+			wantApiActionsCount: 5,
 			wantIncomplete:      true,
 			wantActiveQLen:      0,
 		},
@@ -3898,7 +3920,7 @@ func TestValidateIncompletePodGroupPods(t *testing.T) {
 						{
 							Type:    schedulingv1alpha3.CompositePodGroupInitiallyScheduled,
 							Status:  metav1.ConditionFalse,
-							Reason:  schedulingv1alpha3.CompositePodGroupReasonUnschedulable,
+							Reason:  schedulingv1alpha3.CompositePodGroupReasonInvalid,
 							Message: "cycle detected in hierarchy at compositepodgroup/default/cpg1",
 						},
 					}
@@ -3910,7 +3932,7 @@ func TestValidateIncompletePodGroupPods(t *testing.T) {
 						{
 							Type:    schedulingv1alpha3.CompositePodGroupInitiallyScheduled,
 							Status:  metav1.ConditionFalse,
-							Reason:  schedulingv1alpha3.CompositePodGroupReasonUnschedulable,
+							Reason:  schedulingv1alpha3.CompositePodGroupReasonInvalid,
 							Message: "cycle detected in hierarchy at compositepodgroup/default/cpg1",
 						},
 					}
@@ -3924,7 +3946,7 @@ func TestValidateIncompletePodGroupPods(t *testing.T) {
 						{
 							Type:    schedulingv1beta1.PodGroupInitiallyScheduled,
 							Status:  metav1.ConditionFalse,
-							Reason:  schedulingv1beta1.PodGroupReasonUnschedulable,
+							Reason:  schedulingv1beta1.PodGroupReasonInvalid,
 							Message: "cycle detected in hierarchy at compositepodgroup/default/cpg1",
 						},
 					}
@@ -4061,8 +4083,8 @@ func TestValidateIncompletePodGroupPods(t *testing.T) {
 					if cond.Status != metav1.ConditionFalse {
 						t.Fatalf("Expected ConditionFalse on podgroup %s, got %v", pg.Name, cond.Status)
 					}
-					if cond.Reason != schedulingv1beta1.PodGroupReasonUnschedulable {
-						t.Fatalf("Expected Reason %s on podgroup %s, got %s", schedulingv1beta1.PodGroupReasonUnschedulable, pg.Name, cond.Reason)
+					if cond.Reason != schedulingv1beta1.PodGroupReasonInvalid {
+						t.Fatalf("Expected Reason %s on podgroup %s, got %s", schedulingv1beta1.PodGroupReasonInvalid, pg.Name, cond.Reason)
 					}
 					if tt.wantConditionSubMsg != "" && !strings.Contains(cond.Message, tt.wantConditionSubMsg) {
 						t.Fatalf("Expected condition message to contain %q on podgroup %s, got %q", tt.wantConditionSubMsg, pg.Name, cond.Message)
@@ -4080,8 +4102,8 @@ func TestValidateIncompletePodGroupPods(t *testing.T) {
 					if cond.Status != metav1.ConditionFalse {
 						t.Fatalf("Expected ConditionFalse on cpg %s, got %v", cpg.Name, cond.Status)
 					}
-					if cond.Reason != schedulingv1alpha3.CompositePodGroupReasonUnschedulable {
-						t.Fatalf("Expected Reason %s on cpg %s, got %s", schedulingv1alpha3.CompositePodGroupReasonUnschedulable, cpg.Name, cond.Reason)
+					if cond.Reason != schedulingv1alpha3.CompositePodGroupReasonInvalid {
+						t.Fatalf("Expected Reason %s on cpg %s, got %s", schedulingv1alpha3.CompositePodGroupReasonInvalid, cpg.Name, cond.Reason)
 					}
 					if tt.wantConditionSubMsg != "" && !strings.Contains(cond.Message, tt.wantConditionSubMsg) {
 						t.Fatalf("Expected condition message to contain %q on cpg %s, got %q", tt.wantConditionSubMsg, cpg.Name, cond.Message)

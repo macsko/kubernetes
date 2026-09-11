@@ -784,6 +784,9 @@ const (
 	// PodGroupReasonSchedulerError reason in the PodGroupInitiallyScheduled condition means that some internal error happens
 	// during scheduling, for example due to nodeAffinity parsing errors.
 	PodGroupReasonSchedulerError string = "SchedulerError"
+	// PodGroupReasonInvalid reason in the PodGroupInitiallyScheduled condition indicates that
+	// kube-scheduler detected an invalid group layout during runtime validation.
+	PodGroupReasonInvalid string = "Invalid"
 	// PodGroupReasonPreemptionByScheduler reason in the DisruptionTarget condition indicates the PodGroup was preempted
 	// to make room for higher-priority PodGroups or Pods.
 	PodGroupReasonPreemptionByScheduler string = "PreemptionByScheduler"

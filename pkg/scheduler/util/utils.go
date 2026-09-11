@@ -28,6 +28,7 @@ import (
 	schedulingv1alpha3 "k8s.io/api/scheduling/v1alpha3"
 	schedulingv1beta1 "k8s.io/api/scheduling/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/net"
@@ -38,6 +39,7 @@ import (
 	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/klog/v2"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
+	fwk "k8s.io/kube-scheduler/framework"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 )
 
@@ -229,6 +231,62 @@ func PatchCompositePodGroupStatus(ctx context.Context, cs kubernetes.Interface, 
 	}
 
 	return retry.OnError(retry.DefaultBackoff, RetriableWithConflict, patchFn)
+}
+
+// PatchPodGroupCondition sets the given condition on the PodGroup status and patches the delta to the API server.
+// It is a no-op if the condition is already present with the same status, reason and message,
+// or if the PodGroup was already reported as scheduled: a successful outcome must never be regressed
+// by a later cycle, e.g. one triggered by extra pods joining the group.
+func PatchPodGroupCondition(ctx context.Context, cs kubernetes.Interface, pg *schedulingv1beta1.PodGroup, condition metav1.Condition) error {
+	existing := apimeta.FindStatusCondition(pg.Status.Conditions, condition.Type)
+	if existing != nil && existing.Status == metav1.ConditionTrue && condition.Status != metav1.ConditionTrue {
+		return nil
+	}
+
+	condition.ObservedGeneration = pg.Generation
+	newStatus := pg.Status.DeepCopy()
+	if !apimeta.SetStatusCondition(&newStatus.Conditions, condition) {
+		return nil
+	}
+
+	return PatchPodGroupStatus(ctx, cs, pg.Name, pg.Namespace, &pg.Status, newStatus)
+}
+
+// PatchCompositePodGroupCondition sets the given condition on the CompositePodGroup status and patches
+// the delta to the API server. It follows the same no-op rules as PatchPodGroupCondition.
+func PatchCompositePodGroupCondition(ctx context.Context, cs kubernetes.Interface, cpg *schedulingv1alpha3.CompositePodGroup, condition metav1.Condition) error {
+	existing := apimeta.FindStatusCondition(cpg.Status.Conditions, condition.Type)
+	if existing != nil && existing.Status == metav1.ConditionTrue && condition.Status != metav1.ConditionTrue {
+		return nil
+	}
+
+	condition.ObservedGeneration = cpg.Generation
+	newStatus := cpg.Status.DeepCopy()
+	if !apimeta.SetStatusCondition(&newStatus.Conditions, condition) {
+		return nil
+	}
+
+	return PatchCompositePodGroupStatus(ctx, cs, cpg.Name, cpg.Namespace, &cpg.Status, newStatus)
+}
+
+// The hierarchy validation errors below are surfaced to users in Pod and (Composite)PodGroup conditions,
+// and are produced by two independent validators (the scheduling queue walks the hierarchy up,
+// the scheduling cycle walks it down), so they are constructed in one place to keep them identical.
+
+// NewHierarchyCycleError returns the error reported when a (composite) pod group hierarchy contains a cycle.
+func NewHierarchyCycleError(key fwk.EntityKey) error {
+	return fmt.Errorf("cycle detected in hierarchy at %s", key.String())
+}
+
+// NewHierarchyDepthExceededError returns the error reported when a (composite) pod group hierarchy is too deep.
+func NewHierarchyDepthExceededError(depth int, key fwk.EntityKey) error {
+	return fmt.Errorf("hierarchy depth %d exceeds maximum allowed depth %d at %s", depth, schedulingv1alpha3.WorkloadMaxTreeDepth, key.String())
+}
+
+// NewHierarchyGroupNotFoundError returns the error reported when a group referenced by the hierarchy
+// has not been observed by the scheduler.
+func NewHierarchyGroupNotFoundError(key fwk.EntityKey) error {
+	return fmt.Errorf("%s does not exist", key.String())
 }
 
 // DeletePod deletes the given <pod> from API server

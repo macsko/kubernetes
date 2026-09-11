@@ -118,7 +118,16 @@ func TestHierarchyValidation(t *testing.T) {
 						ConditionType:   v1.PodScheduled,
 						ConditionStatus: v1.ConditionFalse,
 						Reason:          v1.PodReasonUnschedulable,
-						MessageContains: "cpg-root not found in workload forest",
+						MessageContains: "cpg-root does not exist",
+					},
+				},
+				{
+					Name: "Verify the pod group of the incomplete hierarchy is marked invalid",
+					WaitForPodGroupCondition: &stepsframework.PodGroupConditionCheck{
+						PodGroupName:    "pg1",
+						ConditionStatus: metav1.ConditionFalse,
+						Reason:          schedulingapi.PodGroupReasonInvalid,
+						MessageContains: "cpg-root does not exist",
 					},
 				},
 				{

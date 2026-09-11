@@ -1290,9 +1290,10 @@ func TestWorkloadForest_ValidateHierarchy(t *testing.T) {
 			initialCPGs: []*schedulingv1alpha3.CompositePodGroup{
 				st.MakeCompositePodGroup().Namespace("ns").Name("cpg1").ParentCompositePodGroup("cpg1").Obj(),
 			},
-			key:         fwk.PodGroupKey("ns", "pg1"),
-			expectError: true,
-			wantErrSub:  "cycle detected in hierarchy",
+			key:           fwk.PodGroupKey("ns", "pg1"),
+			expectError:   true,
+			wantErrSub:    "cycle detected in hierarchy",
+			wantHierarchy: sets.New(fwk.PodGroupKey("ns", "pg1"), fwk.CompositePodGroupKey("ns", "cpg1")),
 		},
 		{
 			name:                       "indirect cycle in CPGs (CPG1 -> CPG2 -> CPG1)",
@@ -1304,9 +1305,10 @@ func TestWorkloadForest_ValidateHierarchy(t *testing.T) {
 				st.MakeCompositePodGroup().Namespace("ns").Name("cpg1").ParentCompositePodGroup("cpg2").Obj(),
 				st.MakeCompositePodGroup().Namespace("ns").Name("cpg2").ParentCompositePodGroup("cpg1").Obj(),
 			},
-			key:         fwk.PodGroupKey("ns", "pg1"),
-			expectError: true,
-			wantErrSub:  "cycle detected in hierarchy",
+			key:           fwk.PodGroupKey("ns", "pg1"),
+			expectError:   true,
+			wantErrSub:    "cycle detected in hierarchy",
+			wantHierarchy: sets.New(fwk.PodGroupKey("ns", "pg1"), fwk.CompositePodGroupKey("ns", "cpg1"), fwk.CompositePodGroupKey("ns", "cpg2")),
 		},
 		{
 			name:                       "missing parent composite pod group",
@@ -1314,16 +1316,30 @@ func TestWorkloadForest_ValidateHierarchy(t *testing.T) {
 			initialPodGroups: []*schedulingv1beta1.PodGroup{
 				st.MakePodGroup().Namespace("ns").Name("pg1").ParentCompositePodGroup("cpg-missing").Obj(),
 			},
-			key:         fwk.PodGroupKey("ns", "pg1"),
-			expectError: true,
-			wantErrSub:  "compositepodgroup/ns/cpg-missing not found in workload forest",
+			key:           fwk.PodGroupKey("ns", "pg1"),
+			expectError:   true,
+			wantErrSub:    "compositepodgroup/ns/cpg-missing does not exist",
+			wantHierarchy: sets.New(fwk.PodGroupKey("ns", "pg1")),
+		},
+		{
+			name:                       "missing parent composite pod group collects its other observed children",
+			isCompositePodGroupEnabled: true,
+			initialPodGroups: []*schedulingv1beta1.PodGroup{
+				st.MakePodGroup().Namespace("ns").Name("pg1").ParentCompositePodGroup("cpg-missing").Obj(),
+				st.MakePodGroup().Namespace("ns").Name("pg2").ParentCompositePodGroup("cpg-missing").Obj(),
+			},
+			key:           fwk.PodGroupKey("ns", "pg1"),
+			expectError:   true,
+			wantErrSub:    "compositepodgroup/ns/cpg-missing does not exist",
+			wantHierarchy: sets.New(fwk.PodGroupKey("ns", "pg1"), fwk.PodGroupKey("ns", "pg2")),
 		},
 		{
 			name:                       "pod group not found in forest",
 			isCompositePodGroupEnabled: true,
 			key:                        fwk.PodGroupKey("ns", "pg-nonexistent"),
 			expectError:                true,
-			wantErrSub:                 "podgroup/ns/pg-nonexistent not found in workload forest",
+			wantErrSub:                 "podgroup/ns/pg-nonexistent does not exist",
+			wantHierarchy:              sets.New[fwk.EntityKey](),
 		},
 		{
 			name:                       "composite pod group feature disabled ignores parent pointer",
@@ -1360,10 +1376,12 @@ func TestWorkloadForest_ValidateHierarchy(t *testing.T) {
 					t.Fatalf("expected no error, got: %v", err)
 				}
 			}
-			if tt.wantHierarchy != nil {
-				if diff := cmp.Diff(tt.wantHierarchy, hierarchy); diff != "" {
-					t.Errorf("Unexpected hierarchy (-want +got):\n%s", diff)
-				}
+			gotHierarchy := sets.New[fwk.EntityKey]()
+			for _, gpg := range hierarchy {
+				gotHierarchy.Insert(gpg.GetKey())
+			}
+			if diff := cmp.Diff(tt.wantHierarchy, gotHierarchy); diff != "" {
+				t.Errorf("Unexpected hierarchy (-want +got):\n%s", diff)
 			}
 		})
 	}

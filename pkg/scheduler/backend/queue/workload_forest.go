@@ -27,6 +27,7 @@ import (
 	"k8s.io/klog/v2"
 	fwk "k8s.io/kube-scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kubernetes/pkg/scheduler/util"
 )
 
 // workloadForest maintains a consistent view of observed GenericPodGroup objects (either PodGroup or CompositePodGroup).
@@ -243,61 +244,67 @@ func (wf *workloadForest) buildQueuedPodGroupInfo(logger klog.Logger, rootLookup
 
 // validateHierarchy validates that the hierarchy starting from key (PodGroup) up to its root
 // has no cycles, does not exceed WorkloadMaxTreeDepth, and all ancestor groups exist in the forest.
-// It returns all entity keys belonging to the hierarchy (ancestor path and all their descendants)
-// and an error if validation fails.
-func (wf *workloadForest) validateHierarchy(key fwk.EntityKey) (sets.Set[fwk.EntityKey], error) {
+// It returns all observed groups belonging to that hierarchy: the ancestor path walked up from key,
+// plus everything reachable below those ancestors. The whole hierarchy is returned even on failure,
+// because an invalid hierarchy makes all of its groups unschedulable, and the caller reports
+// the problem on each of them.
+func (wf *workloadForest) validateHierarchy(key fwk.EntityKey) ([]*fwk.GenericPodGroup, error) {
 	depth := 1
-	visitedUp := sets.New[fwk.EntityKey]()
+	ancestors := sets.New[fwk.EntityKey]()
 	currentKey := key
 	var validationErr error
 
 	for {
-		if visitedUp.Has(currentKey) {
-			validationErr = fmt.Errorf("cycle detected in hierarchy at %s", currentKey.String())
+		if ancestors.Has(currentKey) {
+			validationErr = util.NewHierarchyCycleError(currentKey)
 			break
 		}
-		visitedUp.Insert(currentKey)
+		// The key is recorded before the checks below, so that the group breaking the depth limit
+		// and the observed children of a missing parent are still part of the returned hierarchy.
+		ancestors.Insert(currentKey)
+
 		if depth > schedulingv1alpha3.WorkloadMaxTreeDepth {
-			validationErr = fmt.Errorf("hierarchy depth %d exceeds maximum allowed depth %d at %s", depth, schedulingv1alpha3.WorkloadMaxTreeDepth, currentKey.String())
+			validationErr = util.NewHierarchyDepthExceededError(depth, currentKey)
 			break
 		}
 
 		gpg, ok := wf.podGroups[currentKey]
 		if !ok {
-			validationErr = fmt.Errorf("%s not found in workload forest", currentKey.String())
+			validationErr = util.NewHierarchyGroupNotFoundError(currentKey)
 			break
 		}
+
 		if !wf.isCompositePodGroupEnabled || !gpg.HasParent() {
 			break
 		}
-		parentKey, ok := gpg.GetParentKey()
-		if !ok {
-			break
-		}
+		parentKey, _ := gpg.GetParentKey()
 		depth++
 		currentKey = parentKey
 	}
 
-	hierarchy := sets.New[fwk.EntityKey]()
-	var queue []fwk.EntityKey
-	visitedDown := sets.New[fwk.EntityKey]()
-	for k := range visitedUp {
-		hierarchy.Insert(k)
-		queue = append(queue, k)
-		visitedDown.Insert(k)
-	}
+	return wf.collectDescendants(ancestors), validationErr
+}
+
+// collectDescendants returns the given groups together with all their descendants, skipping
+// the groups that have not been observed yet.
+func (wf *workloadForest) collectDescendants(roots sets.Set[fwk.EntityKey]) []*fwk.GenericPodGroup {
+	visited := roots.Clone()
+	queue := visited.UnsortedList()
+	hierarchy := make([]*fwk.GenericPodGroup, 0, len(queue))
 
 	for len(queue) > 0 {
-		curr := queue[0]
+		currentKey := queue[0]
 		queue = queue[1:]
-		for child := range wf.children[curr] {
-			if !visitedDown.Has(child) {
-				visitedDown.Insert(child)
-				hierarchy.Insert(child)
-				queue = append(queue, child)
+
+		if gpg, ok := wf.podGroups[currentKey]; ok {
+			hierarchy = append(hierarchy, gpg)
+		}
+		for childKey := range wf.children[currentKey] {
+			if !visited.Has(childKey) {
+				visited.Insert(childKey)
+				queue = append(queue, childKey)
 			}
 		}
 	}
-
-	return hierarchy, validationErr
+	return hierarchy
 }

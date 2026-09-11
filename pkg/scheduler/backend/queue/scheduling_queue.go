@@ -36,7 +36,6 @@ import (
 	v1 "k8s.io/api/core/v1"
 	schedulingv1alpha3 "k8s.io/api/scheduling/v1alpha3"
 	schedulingv1beta1 "k8s.io/api/scheduling/v1beta1"
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -1388,51 +1387,53 @@ type podToPatch struct {
 }
 
 type groupToPatch struct {
-	podGroup          *schedulingv1beta1.PodGroup
-	compositePodGroup *schedulingv1alpha3.CompositePodGroup
-	err               error
+	gpg           *fwk.GenericPodGroup
+	validationErr error
 }
 
 // validateIncompletePodGroupPods iterates over incompletePodGroupPods, picks up pods that have been
 // waiting longer than podMaxInIncompletePodsDuration, and validates their hierarchy using p.workloadForest.validateHierarchy.
-// If validation fails, it patches the pod status and the member pod groups and composite pod groups with an Unschedulable condition.
+// If validation fails, the pod is patched with an Unschedulable condition and every group of the broken
+// hierarchy is patched with an Invalid condition, so that the problem can be diagnosed from any object involved.
+// The pods are left in incompletePodGroupPods: there is no terminal state, and creating or fixing
+// the missing groups still makes them schedulable.
 func (p *PriorityQueue) validateIncompletePodGroupPods(logger klog.Logger) {
-	p.lock.Lock()
+	if p.client == nil {
+		return
+	}
+	p.lock.RLock()
 
 	currentTime := p.clock.Now()
 	var podsToPatch []podToPatch
-	visitedEntities := sets.New[fwk.EntityKey]()
-	entitiesToUpdate := make(map[fwk.EntityKey]error)
-	groupsToPatch := make(map[fwk.EntityKey]groupToPatch)
+	var groupsToPatch []groupToPatch
+	// Pods of the same pod group, and pod groups of the same hierarchy, share the validation result,
+	// so each hierarchy is walked and each group is patched only once per sweep.
+	validationErrs := make(map[fwk.EntityKey]error)
+	seenGroups := sets.New[fwk.EntityKey]()
 
-	for _, pInfo := range p.incompletePodGroupPods.listPodInfos() {
-		if currentTime.Sub(pInfo.GetTimestamp()) < p.podMaxInIncompletePodsDuration {
-			continue
-		}
-
-		key := fwk.PodGroupKey(pInfo.Pod.Namespace, *pInfo.Pod.Spec.SchedulingGroup.PodGroupName)
-
-		if !visitedEntities.Has(key) {
-			hierarchy, err := p.workloadForest.validateHierarchy(key)
-			for entityKey := range hierarchy {
-				visitedEntities.Insert(entityKey)
+	for pgKey, pInfos := range p.incompletePodGroupPods.forPodGroupPodInfos() {
+		for _, pInfo := range pInfos {
+			if currentTime.Sub(pInfo.GetTimestamp()) < p.podMaxInIncompletePodsDuration {
+				continue
+			}
+			err, validated := validationErrs[pgKey]
+			if !validated {
+				var hierarchy []*fwk.GenericPodGroup
+				hierarchy, err = p.workloadForest.validateHierarchy(pgKey)
+				validationErrs[pgKey] = err
 				if err != nil {
-					entitiesToUpdate[entityKey] = err
-					if gpg, ok := p.workloadForest.podGroups[entityKey]; ok {
-						item := groupToPatch{err: err}
-						if gpg.PodGroup != nil {
-							item.podGroup = gpg.PodGroup.DeepCopy()
+					for _, gpg := range hierarchy {
+						if gpgKey := gpg.GetKey(); !seenGroups.Has(gpgKey) {
+							seenGroups.Insert(gpgKey)
+							groupsToPatch = append(groupsToPatch, groupToPatch{gpg: gpg, validationErr: err})
 						}
-						if gpg.CompositePodGroup != nil {
-							item.compositePodGroup = gpg.CompositePodGroup.DeepCopy()
-						}
-						groupsToPatch[entityKey] = item
 					}
 				}
 			}
-		}
+			if err == nil {
+				continue
+			}
 
-		if err, needsUpdate := entitiesToUpdate[key]; needsUpdate {
 			logger.Error(err, "Pod in incompletePodGroupPods has invalid or incomplete hierarchy", "pod", klog.KObj(pInfo))
 			podsToPatch = append(podsToPatch, podToPatch{
 				pod: pInfo.Pod,
@@ -1445,7 +1446,7 @@ func (p *PriorityQueue) validateIncompletePodGroupPods(logger klog.Logger) {
 			})
 		}
 	}
-	p.lock.Unlock()
+	p.lock.RUnlock()
 
 	ctx := klog.NewContext(context.Background(), logger)
 	for _, item := range podsToPatch {
@@ -1454,57 +1455,28 @@ func (p *PriorityQueue) validateIncompletePodGroupPods(logger klog.Logger) {
 		}
 	}
 	for _, item := range groupsToPatch {
-		if err := p.patchGenericPodGroupStatusCondition(ctx, item); err != nil {
-			if pg := item.podGroup; pg != nil {
-				logger.Error(err, "Failed to patch pod group status for incomplete pod group hierarchy", "podGroup", klog.KObj(pg))
-			} else if cpg := item.compositePodGroup; cpg != nil {
-				logger.Error(err, "Failed to patch composite pod group status for incomplete pod group hierarchy", "compositePodGroup", klog.KObj(cpg))
-			}
+		if err := p.patchGroupInvalidCondition(ctx, item.gpg, item.validationErr); err != nil {
+			logger.Error(err, "Failed to patch group status for invalid pod group hierarchy", "groupType", item.gpg.GetType(), "group", klog.KObj(item.gpg))
 		}
 	}
 }
 
-func (p *PriorityQueue) patchGenericPodGroupStatusCondition(ctx context.Context, item groupToPatch) error {
-	if p.client == nil {
-		return nil
+// patchGroupInvalidCondition reports the hierarchy validation error on the group object.
+func (p *PriorityQueue) patchGroupInvalidCondition(ctx context.Context, gpg *fwk.GenericPodGroup, validationErr error) error {
+	if pg := gpg.GetPodGroup(); pg != nil {
+		return util.PatchPodGroupCondition(ctx, p.client, pg, metav1.Condition{
+			Type:    schedulingv1beta1.PodGroupInitiallyScheduled,
+			Status:  metav1.ConditionFalse,
+			Reason:  schedulingv1beta1.PodGroupReasonInvalid,
+			Message: validationErr.Error(),
+		})
 	}
-	if pg := item.podGroup; pg != nil {
-		condition := metav1.Condition{
-			Type:               schedulingv1beta1.PodGroupInitiallyScheduled,
-			Status:             metav1.ConditionFalse,
-			Reason:             schedulingv1beta1.PodGroupReasonUnschedulable,
-			Message:            item.err.Error(),
-			ObservedGeneration: pg.Generation,
-		}
-		existing := apimeta.FindStatusCondition(pg.Status.Conditions, condition.Type)
-		if existing != nil && existing.Status == metav1.ConditionTrue && condition.Status != metav1.ConditionTrue {
-			return nil
-		}
-		newStatus := pg.Status.DeepCopy()
-		if !apimeta.SetStatusCondition(&newStatus.Conditions, condition) {
-			return nil
-		}
-		return util.PatchPodGroupStatus(ctx, p.client, pg.Name, pg.Namespace, &pg.Status, newStatus)
-	}
-	if cpg := item.compositePodGroup; cpg != nil {
-		condition := metav1.Condition{
-			Type:               schedulingv1alpha3.CompositePodGroupInitiallyScheduled,
-			Status:             metav1.ConditionFalse,
-			Reason:             schedulingv1alpha3.CompositePodGroupReasonUnschedulable,
-			Message:            item.err.Error(),
-			ObservedGeneration: cpg.Generation,
-		}
-		existing := apimeta.FindStatusCondition(cpg.Status.Conditions, condition.Type)
-		if existing != nil && existing.Status == metav1.ConditionTrue && condition.Status != metav1.ConditionTrue {
-			return nil
-		}
-		newStatus := cpg.Status.DeepCopy()
-		if !apimeta.SetStatusCondition(&newStatus.Conditions, condition) {
-			return nil
-		}
-		return util.PatchCompositePodGroupStatus(ctx, p.client, cpg.Name, cpg.Namespace, &cpg.Status, newStatus)
-	}
-	return nil
+	return util.PatchCompositePodGroupCondition(ctx, p.client, gpg.GetCompositePodGroup(), metav1.Condition{
+		Type:    schedulingv1alpha3.CompositePodGroupInitiallyScheduled,
+		Status:  metav1.ConditionFalse,
+		Reason:  schedulingv1alpha3.CompositePodGroupReasonInvalid,
+		Message: validationErr.Error(),
+	})
 }
 
 func (p *PriorityQueue) patchPodStatusCondition(ctx context.Context, pod *v1.Pod, condition *v1.PodCondition) error {
