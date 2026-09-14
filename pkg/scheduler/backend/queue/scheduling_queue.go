@@ -1406,42 +1406,53 @@ func (p *PriorityQueue) validateIncompletePodGroupPods(logger klog.Logger) {
 	currentTime := p.clock.Now()
 	var podsToPatch []podToPatch
 	var groupsToPatch []groupToPatch
-	// Pods of the same pod group, and pod groups of the same hierarchy, share the validation result,
-	// so each hierarchy is walked and each group is patched only once per sweep.
-	validationErrs := make(map[fwk.EntityKey]error)
+	// All the pod groups of a single hierarchy fail with the same error, so the hierarchy is walked
+	// at most once per sweep and the result is shared by the pod groups it contains.
+	hierarchyErrs := make(map[fwk.EntityKey]error)
 	seenGroups := sets.New[fwk.EntityKey]()
 
 	for pgKey, pInfos := range p.incompletePodGroupPods.forPodGroupPodInfos() {
+		validationErr, validated := hierarchyErrs[pgKey]
 		for _, pInfo := range pInfos {
 			if currentTime.Sub(pInfo.GetTimestamp()) < p.podMaxInIncompletePodsDuration {
 				continue
 			}
-			err, validated := validationErrs[pgKey]
 			if !validated {
+				// The hierarchy is walked only once the first pod of the group exceeds the timeout,
+				// so that groups whose pods are still fresh don't pay for the validation at all.
 				var hierarchy []*fwk.GenericPodGroup
-				hierarchy, err = p.workloadForest.validateHierarchy(pgKey)
-				validationErrs[pgKey] = err
-				if err != nil {
+				hierarchy, validationErr = p.workloadForest.validateHierarchy(pgKey)
+				validated = true
+
+				if validationErr != nil {
 					for _, gpg := range hierarchy {
-						if gpgKey := gpg.GetKey(); !seenGroups.Has(gpgKey) {
-							seenGroups.Insert(gpgKey)
-							groupsToPatch = append(groupsToPatch, groupToPatch{gpg: gpg, validationErr: err})
+						gpgKey := gpg.GetKey()
+						if seenGroups.Has(gpgKey) {
+							continue
+						}
+						seenGroups.Insert(gpgKey)
+						groupsToPatch = append(groupsToPatch, groupToPatch{gpg: gpg, validationErr: validationErr})
+						if gpg.GetType() == fwk.PodGroupKeyType {
+							// The pods of this group don't have to walk the same hierarchy again,
+							// and report the same problem as the group itself.
+							hierarchyErrs[gpgKey] = validationErr
 						}
 					}
 				}
 			}
-			if err == nil {
-				continue
+			if validationErr == nil {
+				// Nothing to report for this pod, nor for the remaining pods of the same group.
+				break
 			}
 
-			logger.Error(err, "Pod in incompletePodGroupPods has invalid or incomplete hierarchy", "pod", klog.KObj(pInfo))
+			logger.Error(validationErr, "Pod in incompletePodGroupPods has invalid or incomplete hierarchy", "pod", klog.KObj(pInfo))
 			podsToPatch = append(podsToPatch, podToPatch{
 				pod: pInfo.Pod,
 				condition: &v1.PodCondition{
 					Type:    v1.PodScheduled,
 					Status:  v1.ConditionFalse,
 					Reason:  v1.PodReasonUnschedulable,
-					Message: err.Error(),
+					Message: validationErr.Error(),
 				},
 			})
 		}

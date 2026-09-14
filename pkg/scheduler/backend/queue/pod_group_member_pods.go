@@ -109,7 +109,8 @@ func (p *podGroupMemberPods) list() []*v1.Pod {
 	return pods
 }
 
-// forPodGroupPodInfos returns an iterator over all tracked queued pod infos.
+// forPodGroupPodInfos returns an iterator over all tracked queued pod infos, grouped by pod group key.
+// The yielded maps are the internal ones and must not be modified by the caller.
 func (p *podGroupMemberPods) forPodGroupPodInfos() iter.Seq2[fwk.EntityKey, map[fwk.EntityKey]*framework.QueuedPodInfo] {
 	return iter.Seq2[fwk.EntityKey, map[fwk.EntityKey]*framework.QueuedPodInfo](func(yield func(fwk.EntityKey, map[fwk.EntityKey]*framework.QueuedPodInfo) bool) {
 		for pgKey, pgPods := range p.podGroupToPodInfos {

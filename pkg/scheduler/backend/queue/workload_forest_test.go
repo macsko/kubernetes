@@ -1282,6 +1282,26 @@ func TestWorkloadForest_ValidateHierarchy(t *testing.T) {
 			wantHierarchy: sets.New(fwk.PodGroupKey("ns", "pg1"), fwk.CompositePodGroupKey("ns", "cpg1"), fwk.CompositePodGroupKey("ns", "cpg2"), fwk.CompositePodGroupKey("ns", "cpg3"), fwk.CompositePodGroupKey("ns", "cpg4")),
 		},
 		{
+			// pg1 sits 2 levels below the root, but the branch of pg2 makes the hierarchy too deep,
+			// which is only visible when walking back down from the root.
+			name:                       "depth exceeded in another branch of the hierarchy",
+			isCompositePodGroupEnabled: true,
+			initialPodGroups: []*schedulingv1beta1.PodGroup{
+				st.MakePodGroup().Namespace("ns").Name("pg1").ParentCompositePodGroup("cpg4").Obj(),
+				st.MakePodGroup().Namespace("ns").Name("pg2").ParentCompositePodGroup("cpg1").Obj(),
+			},
+			initialCPGs: []*schedulingv1alpha3.CompositePodGroup{
+				st.MakeCompositePodGroup().Namespace("ns").Name("cpg1").ParentCompositePodGroup("cpg2").Obj(),
+				st.MakeCompositePodGroup().Namespace("ns").Name("cpg2").ParentCompositePodGroup("cpg3").Obj(),
+				st.MakeCompositePodGroup().Namespace("ns").Name("cpg3").ParentCompositePodGroup("cpg4").Obj(),
+				st.MakeCompositePodGroup().Namespace("ns").Name("cpg4").Obj(),
+			},
+			key:           fwk.PodGroupKey("ns", "pg1"),
+			expectError:   true,
+			wantErrSub:    "hierarchy depth 5 exceeds maximum allowed depth 4 at podgroup/ns/pg2",
+			wantHierarchy: sets.New(fwk.PodGroupKey("ns", "pg1"), fwk.PodGroupKey("ns", "pg2"), fwk.CompositePodGroupKey("ns", "cpg1"), fwk.CompositePodGroupKey("ns", "cpg2"), fwk.CompositePodGroupKey("ns", "cpg3"), fwk.CompositePodGroupKey("ns", "cpg4")),
+		},
+		{
 			name:                       "direct cycle in CPG (CPG1 -> CPG1)",
 			isCompositePodGroupEnabled: true,
 			initialPodGroups: []*schedulingv1beta1.PodGroup{
