@@ -39,7 +39,6 @@ import (
 	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/klog/v2"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
-	fwk "k8s.io/kube-scheduler/framework"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 )
 
@@ -267,26 +266,6 @@ func PatchCompositePodGroupCondition(ctx context.Context, cs kubernetes.Interfac
 	}
 
 	return PatchCompositePodGroupStatus(ctx, cs, cpg.Name, cpg.Namespace, &cpg.Status, newStatus)
-}
-
-// The hierarchy validation errors below are surfaced to users in Pod and (Composite)PodGroup conditions,
-// and are produced by two independent validators (the scheduling queue walks the hierarchy up,
-// the scheduling cycle walks it down), so they are constructed in one place to keep them identical.
-
-// NewHierarchyCycleError returns the error reported when a (composite) pod group hierarchy contains a cycle.
-func NewHierarchyCycleError(key fwk.EntityKey) error {
-	return fmt.Errorf("cycle detected in hierarchy at %s", key.String())
-}
-
-// NewHierarchyDepthExceededError returns the error reported when a (composite) pod group hierarchy is too deep.
-func NewHierarchyDepthExceededError(depth int, key fwk.EntityKey) error {
-	return fmt.Errorf("hierarchy depth %d exceeds maximum allowed depth %d at %s", depth, schedulingv1alpha3.WorkloadMaxTreeDepth, key.String())
-}
-
-// NewHierarchyGroupNotFoundError returns the error reported when a group referenced by the hierarchy
-// has not been observed by the scheduler.
-func NewHierarchyGroupNotFoundError(key fwk.EntityKey) error {
-	return fmt.Errorf("%s does not exist", key.String())
 }
 
 // DeletePod deletes the given <pod> from API server

@@ -18,7 +18,6 @@ package podgroup
 
 import (
 	"testing"
-	"time"
 
 	v1 "k8s.io/api/core/v1"
 	schedulingapi "k8s.io/api/scheduling/v1beta1"
@@ -45,101 +44,6 @@ func TestHierarchyValidation(t *testing.T) {
 		name  string
 		steps []stepsframework.Step
 	}{
-		{
-			name: "Incomplete pod group hierarchy with cycle is marked unschedulable and scheduled after breaking cycle",
-			steps: []stepsframework.Step{
-				{
-					Name:                    "Create cyclic composite pod group cpg1",
-					CreateCompositePodGroup: st.MakeCompositePodGroup().Name("cpg1").WorkloadRef("wl", "cpg1-t").ParentCompositePodGroup("cpg2").BasicPolicy().Priority(100).Obj(),
-				},
-				{
-					Name:                    "Create cpg2 pointing back to cpg1 forming cycle",
-					CreateCompositePodGroup: st.MakeCompositePodGroup().Name("cpg2").WorkloadRef("wl", "cpg2-t").ParentCompositePodGroup("cpg1").BasicPolicy().Priority(100).Obj(),
-				},
-				{
-					Name:           "Create pod group referencing cpg1",
-					CreatePodGroup: st.MakePodGroup().Name("pg1").WorkloadRef("tmpl", "wl").ParentCompositePodGroup("cpg1").BasicPolicy().Priority(100).Obj(),
-				},
-				{
-					Name:       "Create pod for pg1",
-					CreatePods: makeTestPods("pg1", "1"),
-				},
-				{
-					Name:                                "Verify pod is placed in incompletePodGroupPods",
-					WaitForPodsInIncompletePodGroupPods: []string{"pg1-pod-0"},
-				},
-				{
-					Name: "Verify queue goroutine validates hierarchy and patches pod unschedulable with cycle diagnostic",
-					WaitForPodCondition: &stepsframework.PodConditionCheck{
-						PodName:         "pg1-pod-0",
-						ConditionType:   v1.PodScheduled,
-						ConditionStatus: v1.ConditionFalse,
-						Reason:          v1.PodReasonUnschedulable,
-						MessageContains: "cycle detected in hierarchy",
-					},
-				},
-				{
-					Name:                    "Break cycle by deleting cpg2",
-					DeleteCompositePodGroup: "cpg2",
-				},
-				{
-					Name:                    "Recreate cpg2 as root without parent",
-					CreateCompositePodGroup: st.MakeCompositePodGroup().Name("cpg2").WorkloadRef("wl", "cpg2-t").BasicPolicy().Priority(100).Obj(),
-				},
-				{
-					Name:                 "Verify pod is promoted from incompletePodGroupPods and scheduled",
-					WaitForPodsScheduled: []string{"pg1-pod-0"},
-				},
-			},
-		},
-		{
-			name: "Incomplete pod group hierarchy with missing parent is marked unschedulable and scheduled after parent created",
-			steps: []stepsframework.Step{
-				{
-					Name:                    "Create cpg1 with non-existent parent cpg-root",
-					CreateCompositePodGroup: st.MakeCompositePodGroup().Name("cpg1").WorkloadRef("wl", "cpg1-t").ParentCompositePodGroup("cpg-root").BasicPolicy().Priority(100).Obj(),
-				},
-				{
-					Name:           "Create pod group referencing cpg1",
-					CreatePodGroup: st.MakePodGroup().Name("pg1").WorkloadRef("tmpl", "wl").ParentCompositePodGroup("cpg1").BasicPolicy().Priority(100).Obj(),
-				},
-				{
-					Name:       "Create pod for pg1",
-					CreatePods: makeTestPods("pg1", "1"),
-				},
-				{
-					Name:                                "Verify pod is placed in incompletePodGroupPods",
-					WaitForPodsInIncompletePodGroupPods: []string{"pg1-pod-0"},
-				},
-				{
-					Name: "Verify queue goroutine validates hierarchy and patches pod unschedulable with missing parent diagnostic",
-					WaitForPodCondition: &stepsframework.PodConditionCheck{
-						PodName:         "pg1-pod-0",
-						ConditionType:   v1.PodScheduled,
-						ConditionStatus: v1.ConditionFalse,
-						Reason:          v1.PodReasonUnschedulable,
-						MessageContains: "cpg-root does not exist",
-					},
-				},
-				{
-					Name: "Verify the pod group of the incomplete hierarchy is marked invalid",
-					WaitForPodGroupCondition: &stepsframework.PodGroupConditionCheck{
-						PodGroupName:    "pg1",
-						ConditionStatus: metav1.ConditionFalse,
-						Reason:          schedulingapi.PodGroupReasonInvalid,
-						MessageContains: "cpg-root does not exist",
-					},
-				},
-				{
-					Name:                    "Create missing root composite pod group",
-					CreateCompositePodGroup: st.MakeCompositePodGroup().Name("cpg-root").WorkloadRef("wl", "root-t").BasicPolicy().Priority(100).Obj(),
-				},
-				{
-					Name:                 "Verify pod is promoted from incompletePodGroupPods and scheduled",
-					WaitForPodsScheduled: []string{"pg1-pod-0"},
-				},
-			},
-		},
 		{
 			name: "Pod group hierarchy exceeding WorkloadMaxTreeDepth fails validation in scheduling cycle",
 			steps: []stepsframework.Step{
@@ -195,8 +99,6 @@ func TestHierarchyValidation(t *testing.T) {
 			testCtx := testutils.InitTestSchedulerWithNS(t, "hierarchy-val",
 				scheduler.WithPodMaxBackoffSeconds(1),
 				scheduler.WithPodInitialBackoffSeconds(1),
-				scheduler.WithPodMaxInIncompletePodsDuration(time.Second),
-				scheduler.WithIncompletePodGroupPodsPeriod(time.Second),
 			)
 
 			commonSteps := []stepsframework.Step{

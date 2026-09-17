@@ -43,12 +43,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
-	clientset "k8s.io/client-go/kubernetes"
 	listersv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/component-helpers/resource"
 	"k8s.io/klog/v2"
 	fwk "k8s.io/kube-scheduler/framework"
-	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/scheduler/backend/heap"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
@@ -65,9 +63,6 @@ const (
 	// backoffQ or activeQ. If this value is empty, the default value (5min)
 	// will be used.
 	DefaultPodMaxInUnschedulablePodsDuration time.Duration = 5 * time.Minute
-	// DefaultIncompletePodGroupPodsPeriod is the default period for running periodic validation
-	// on pods in incompletePodGroupPods.
-	DefaultIncompletePodGroupPodsPeriod time.Duration = 5 * time.Minute
 	// Scheduling queue names
 	activeQ        = "Active"
 	backoffQ       = "Backoff"
@@ -214,10 +209,6 @@ type PriorityQueue struct {
 
 	// the maximum time a pod can stay in the unschedulableEntities.
 	podMaxInUnschedulablePodsDuration time.Duration
-	// the maximum time a pod can stay in incompletePodGroupPods before being validated.
-	podMaxInIncompletePodsDuration time.Duration
-	// incompletePodGroupPodsPeriod is the period for checking incompletePodGroupPods.
-	incompletePodGroupPodsPeriod time.Duration
 
 	activeQ  activeQueuer
 	backoffQ backoffQueuer
@@ -253,9 +244,6 @@ type PriorityQueue struct {
 	// apiDispatcher is used for the methods that are expected to send API calls.
 	// It's non-nil only if the SchedulerAsyncAPICalls feature gate is enabled.
 	apiDispatcher fwk.APIDispatcher
-
-	// client is used to perform API calls directly when apiDispatcher is not enabled.
-	client clientset.Interface
 
 	// podSigners maps a profile name to a signing function for that profile.
 	podSigners map[string]PodSigner
@@ -295,8 +283,6 @@ type priorityQueueOptions struct {
 	podInitialBackoffDuration         time.Duration
 	podMaxBackoffDuration             time.Duration
 	podMaxInUnschedulablePodsDuration time.Duration
-	podMaxInIncompletePodsDuration    time.Duration
-	incompletePodGroupPodsPeriod      time.Duration
 	podLister                         listersv1.PodLister
 	metricsRecorder                   *metrics.MetricAsyncRecorder
 	pluginMetricsSamplePercent        int
@@ -304,7 +290,6 @@ type priorityQueueOptions struct {
 	queueingHintMap                   QueueingHintMapPerProfile
 	apiDispatcher                     fwk.APIDispatcher
 	podSigners                        map[string]PodSigner
-	client                            clientset.Interface
 }
 
 // Option configures a PriorityQueue
@@ -314,13 +299,6 @@ type Option func(*priorityQueueOptions)
 func WithClock(clock clock.WithTicker) Option {
 	return func(o *priorityQueueOptions) {
 		o.clock = clock
-	}
-}
-
-// WithClient sets the Kubernetes client for PriorityQueue.
-func WithClient(client clientset.Interface) Option {
-	return func(o *priorityQueueOptions) {
-		o.client = client
 	}
 }
 
@@ -349,20 +327,6 @@ func WithPodLister(pl listersv1.PodLister) Option {
 func WithPodMaxInUnschedulablePodsDuration(duration time.Duration) Option {
 	return func(o *priorityQueueOptions) {
 		o.podMaxInUnschedulablePodsDuration = duration
-	}
-}
-
-// WithPodMaxInIncompletePodsDuration sets podMaxInIncompletePodsDuration for PriorityQueue.
-func WithPodMaxInIncompletePodsDuration(duration time.Duration) Option {
-	return func(o *priorityQueueOptions) {
-		o.podMaxInIncompletePodsDuration = duration
-	}
-}
-
-// WithIncompletePodGroupPodsPeriod sets incompletePodGroupPodsPeriod for PriorityQueue.
-func WithIncompletePodGroupPodsPeriod(duration time.Duration) Option {
-	return func(o *priorityQueueOptions) {
-		o.incompletePodGroupPodsPeriod = duration
 	}
 }
 
@@ -422,8 +386,6 @@ var defaultPriorityQueueOptions = priorityQueueOptions{
 	podInitialBackoffDuration:         DefaultPodInitialBackoffDuration,
 	podMaxBackoffDuration:             DefaultPodMaxBackoffDuration,
 	podMaxInUnschedulablePodsDuration: DefaultPodMaxInUnschedulablePodsDuration,
-	podMaxInIncompletePodsDuration:    DefaultIncompletePodGroupPodsPeriod,
-	incompletePodGroupPodsPeriod:      DefaultIncompletePodGroupPodsPeriod,
 }
 
 // Making sure that PriorityQueue implements SchedulingQueue.
@@ -483,8 +445,6 @@ func NewPriorityQueue(
 		clock:                             options.clock,
 		stop:                              make(chan struct{}),
 		podMaxInUnschedulablePodsDuration: options.podMaxInUnschedulablePodsDuration,
-		podMaxInIncompletePodsDuration:    options.podMaxInIncompletePodsDuration,
-		incompletePodGroupPodsPeriod:      options.incompletePodGroupPodsPeriod,
 		backoffQ:                          backoffQ,
 		unschedulableEntities:             newUnschedulableEntities(metrics.NewUnschedulableEntitiesRecorder(), metrics.NewGatedEntitiesRecorder()),
 		pendingPodGroupPods:               newPodGroupMemberPods(metrics.PendingPodGroupPods()),
@@ -496,7 +456,6 @@ func NewPriorityQueue(
 		metricsRecorder:                   options.metricsRecorder,
 		pluginMetricsSamplePercent:        options.pluginMetricsSamplePercent,
 		apiDispatcher:                     options.apiDispatcher,
-		client:                            options.client,
 		podSigners:                        options.podSigners,
 		isPopFromBackoffQEnabled:          isPopFromBackoffQEnabled,
 		isGenericWorkloadEnabled:          isGenericWorkloadEnabled,
@@ -545,11 +504,6 @@ func (p *PriorityQueue) Run(logger klog.Logger) {
 	go wait.Until(func() {
 		p.flushUnschedulableEntitiesLeftover(logger)
 	}, 30*time.Second, p.stop)
-	if p.isGenericWorkloadEnabled {
-		go wait.Until(func() {
-			p.validateIncompletePodGroupPods(logger)
-		}, p.incompletePodGroupPodsPeriod, p.stop)
-	}
 }
 
 // queueingStrategy indicates how the scheduling queue should enqueue the Pod from unschedulable pod pool.
@@ -1379,129 +1333,6 @@ func (p *PriorityQueue) flushUnschedulableEntitiesLeftover(logger klog.Logger) {
 	if len(entitiesToMove) > 0 {
 		p.moveEntitiesToActiveOrBackoffQueue(logger, entitiesToMove, framework.EventUnschedulableTimeout, nil, nil, nil)
 	}
-}
-
-type podToPatch struct {
-	pod       *v1.Pod
-	condition *v1.PodCondition
-}
-
-type groupToPatch struct {
-	gpg           *fwk.GenericPodGroup
-	validationErr error
-}
-
-// validateIncompletePodGroupPods iterates over incompletePodGroupPods, picks up pods that have been
-// waiting longer than podMaxInIncompletePodsDuration, and validates their hierarchy using p.workloadForest.validateHierarchy.
-// If validation fails, the pod is patched with an Unschedulable condition and every group of the broken
-// hierarchy is patched with an Invalid condition, so that the problem can be diagnosed from any object involved.
-// The pods are left in incompletePodGroupPods: there is no terminal state, and creating or fixing
-// the missing groups still makes them schedulable.
-func (p *PriorityQueue) validateIncompletePodGroupPods(logger klog.Logger) {
-	if p.client == nil {
-		return
-	}
-	p.lock.RLock()
-
-	currentTime := p.clock.Now()
-	var podsToPatch []podToPatch
-	var groupsToPatch []groupToPatch
-	// All the pod groups of a single hierarchy fail with the same error, so the hierarchy is walked
-	// at most once per sweep and the result is shared by the pod groups it contains.
-	hierarchyErrs := make(map[fwk.EntityKey]error)
-	seenGroups := sets.New[fwk.EntityKey]()
-
-	for pgKey, pInfos := range p.incompletePodGroupPods.forPodGroupPodInfos() {
-		validationErr, validated := hierarchyErrs[pgKey]
-		for _, pInfo := range pInfos {
-			if currentTime.Sub(pInfo.GetTimestamp()) < p.podMaxInIncompletePodsDuration {
-				continue
-			}
-			if !validated {
-				// The hierarchy is walked only once the first pod of the group exceeds the timeout,
-				// so that groups whose pods are still fresh don't pay for the validation at all.
-				var hierarchy []*fwk.GenericPodGroup
-				hierarchy, validationErr = p.workloadForest.validateHierarchy(pgKey)
-				validated = true
-
-				if validationErr != nil {
-					for _, gpg := range hierarchy {
-						gpgKey := gpg.GetKey()
-						if seenGroups.Has(gpgKey) {
-							continue
-						}
-						seenGroups.Insert(gpgKey)
-						groupsToPatch = append(groupsToPatch, groupToPatch{gpg: gpg, validationErr: validationErr})
-						if gpg.GetType() == fwk.PodGroupKeyType {
-							// The pods of this group don't have to walk the same hierarchy again,
-							// and report the same problem as the group itself.
-							hierarchyErrs[gpgKey] = validationErr
-						}
-					}
-				}
-			}
-			if validationErr == nil {
-				// Nothing to report for this pod, nor for the remaining pods of the same group.
-				break
-			}
-
-			logger.Error(validationErr, "Pod in incompletePodGroupPods has invalid or incomplete hierarchy", "pod", klog.KObj(pInfo))
-			podsToPatch = append(podsToPatch, podToPatch{
-				pod: pInfo.Pod,
-				condition: &v1.PodCondition{
-					Type:    v1.PodScheduled,
-					Status:  v1.ConditionFalse,
-					Reason:  v1.PodReasonUnschedulable,
-					Message: validationErr.Error(),
-				},
-			})
-		}
-	}
-	p.lock.RUnlock()
-
-	ctx := klog.NewContext(context.Background(), logger)
-	for _, item := range podsToPatch {
-		if err := p.patchPodStatusCondition(ctx, item.pod, item.condition); err != nil {
-			logger.Error(err, "Failed to patch pod status for incomplete pod group", "pod", klog.KObj(item.pod))
-		}
-	}
-	for _, item := range groupsToPatch {
-		if err := p.patchGroupInvalidCondition(ctx, item.gpg, item.validationErr); err != nil {
-			logger.Error(err, "Failed to patch group status for invalid pod group hierarchy", "groupType", item.gpg.GetType(), "group", klog.KObj(item.gpg))
-		}
-	}
-}
-
-// patchGroupInvalidCondition reports the hierarchy validation error on the group object.
-func (p *PriorityQueue) patchGroupInvalidCondition(ctx context.Context, gpg *fwk.GenericPodGroup, validationErr error) error {
-	if pg := gpg.GetPodGroup(); pg != nil {
-		return util.PatchPodGroupCondition(ctx, p.client, pg, metav1.Condition{
-			Type:    schedulingv1beta1.PodGroupInitiallyScheduled,
-			Status:  metav1.ConditionFalse,
-			Reason:  schedulingv1beta1.PodGroupReasonInvalid,
-			Message: validationErr.Error(),
-		})
-	}
-	return util.PatchCompositePodGroupCondition(ctx, p.client, gpg.GetCompositePodGroup(), metav1.Condition{
-		Type:    schedulingv1alpha3.CompositePodGroupInitiallyScheduled,
-		Status:  metav1.ConditionFalse,
-		Reason:  schedulingv1alpha3.CompositePodGroupReasonInvalid,
-		Message: validationErr.Error(),
-	})
-}
-
-func (p *PriorityQueue) patchPodStatusCondition(ctx context.Context, pod *v1.Pod, condition *v1.PodCondition) error {
-	if utilfeature.DefaultFeatureGate.Enabled(features.SchedulerAsyncAPICalls) && p.apiDispatcher != nil {
-		conditions := []*v1.PodCondition{condition}
-		_, err := p.PatchPodStatus(pod, conditions, nil)
-		return err
-	}
-	podStatusCopy := pod.Status.DeepCopy()
-	if !podutil.UpdatePodCondition(podStatusCopy, condition) {
-		return nil
-	}
-	// Update pod object in-memory as well?
-	return util.PatchPodStatus(ctx, p.client, pod.Name, pod.Namespace, &pod.Status, podStatusCopy)
 }
 
 // Pop removes the head of the active queue and returns it. It blocks if the

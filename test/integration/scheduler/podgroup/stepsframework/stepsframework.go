@@ -157,8 +157,6 @@ type Step struct {
 	CreateCompositePodGroup *schedulingv1alpha3.CompositePodGroup
 	// UpdateCompositePodGroup is used to update an existing composite pod group and wait for it to propagate.
 	UpdateCompositePodGroup *schedulingv1alpha3.CompositePodGroup
-	// DeleteCompositePodGroup is used to delete a composite pod group by name and wait for it to propagate.
-	DeleteCompositePodGroup string
 	// CreatePods is use to create pods in the cluster.
 	CreatePods []*v1.Pod
 	// CreatePodsInOrder is use to create pods in the cluster and have them enqueued by the scheduler in the specified order.
@@ -376,37 +374,6 @@ func updateCompositePodGroup(testCtx *testutils.TestContext, ns string, cpg *sch
 	)
 	if err != nil {
 		return fmt.Errorf("failed to wait for composite pod group %s update to be discoverable by scheduler: %w", cpgCopy.Name, err)
-	}
-	return nil
-}
-
-func deleteCompositePodGroup(testCtx *testutils.TestContext, ns string, cpgName string) error {
-	cs := testCtx.ClientSet
-
-	cpg, err := cs.SchedulingV1alpha3().CompositePodGroups(ns).Get(testCtx.Ctx, cpgName, metav1.GetOptions{})
-	if err == nil && len(cpg.Finalizers) > 0 {
-		cpg.Finalizers = nil
-		if _, err = cs.SchedulingV1alpha3().CompositePodGroups(ns).Update(testCtx.Ctx, cpg, metav1.UpdateOptions{}); err != nil {
-			return fmt.Errorf("failed to clear finalizers of composite pod group %s: %w", cpgName, err)
-		}
-	}
-	if err := cs.SchedulingV1alpha3().CompositePodGroups(ns).Delete(testCtx.Ctx, cpgName, metav1.DeleteOptions{}); err != nil {
-		return fmt.Errorf("failed to delete composite pod group %s: %w", cpgName, err)
-	}
-	err = wait.PollUntilContextTimeout(testCtx.Ctx, 100*time.Millisecond, wait.ForeverTestTimeout, false,
-		func(_ context.Context) (bool, error) {
-			_, err := testCtx.InformerFactory.Scheduling().V1alpha3().CompositePodGroups().Lister().CompositePodGroups(ns).Get(cpgName)
-			if err != nil {
-				if apierrors.IsNotFound(err) {
-					return true, nil
-				}
-				return false, err
-			}
-			return false, nil
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to wait for composite pod group %s deletion to propagate: %w", cpgName, err)
 	}
 	return nil
 }
@@ -852,8 +819,6 @@ func RunSteps(testCtx *testutils.TestContext, t *testing.T, ns string, steps []S
 			err = createCompositePodGroup(testCtx, ns, step.CreateCompositePodGroup)
 		case step.UpdateCompositePodGroup != nil:
 			err = updateCompositePodGroup(testCtx, ns, step.UpdateCompositePodGroup)
-		case step.DeleteCompositePodGroup != "":
-			err = deleteCompositePodGroup(testCtx, ns, step.DeleteCompositePodGroup)
 		case step.CreatePodGroup != nil:
 			err = createPodGroup(testCtx, ns, step.CreatePodGroup)
 		case step.UpdatePodGroup != nil:

@@ -187,10 +187,10 @@ func validateHierarchy(root fwk.PodGroupInfo) error {
 	walk = func(node fwk.PodGroupInfo, depth int) error {
 		key := node.GetKey()
 		if visited.Has(key) {
-			return util.NewHierarchyCycleError(key)
+			return fmt.Errorf("cycle detected in hierarchy at %s", key.String())
 		}
 		if depth > schedulingv1alpha3.WorkloadMaxTreeDepth {
-			return util.NewHierarchyDepthExceededError(depth, key)
+			return fmt.Errorf("hierarchy depth %d exceeds maximum allowed depth %d at %s", depth, schedulingv1alpha3.WorkloadMaxTreeDepth, key.String())
 		}
 		visited.Insert(key)
 		for _, child := range node.GetChildren() {

@@ -18,17 +18,14 @@ package queue
 
 import (
 	"fmt"
-	"slices"
 
 	v1 "k8s.io/api/core/v1"
-	schedulingv1alpha3 "k8s.io/api/scheduling/v1alpha3"
 	schedulingv1beta1 "k8s.io/api/scheduling/v1beta1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	fwk "k8s.io/kube-scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
-	"k8s.io/kubernetes/pkg/scheduler/util"
 )
 
 // workloadForest maintains a consistent view of observed GenericPodGroup objects (either PodGroup or CompositePodGroup).
@@ -241,103 +238,4 @@ func (wf *workloadForest) buildQueuedPodGroupInfo(logger klog.Logger, rootLookup
 		PodGroupInfo:   wf.buildPodGroupInfo(logger, gpg, sets.New[fwk.EntityKey]()),
 		QueuedPodInfos: make(map[fwk.EntityKey][]*framework.QueuedPodInfo),
 	}
-}
-
-// validateHierarchy validates that the hierarchy containing key (PodGroup) has no cycles,
-// does not exceed WorkloadMaxTreeDepth in any of its branches, and that all the ancestors of key
-// exist in the forest.
-// It returns all observed groups belonging to that hierarchy: the ancestor path walked up from key,
-// plus everything reachable below those ancestors. The whole hierarchy is returned even on failure,
-// because an invalid hierarchy makes all of its groups unschedulable, and the caller reports
-// the problem on each of them.
-func (wf *workloadForest) validateHierarchy(key fwk.EntityKey) ([]*fwk.GenericPodGroup, error) {
-	visited := sets.New[fwk.EntityKey]()
-	// The ancestors are kept in order, so that a cycle can be extracted as a suffix of the path.
-	var path []fwk.EntityKey
-	currentKey := key
-
-	for {
-		if visited.Has(currentKey) {
-			hierarchy, _ := wf.collectSubtrees(sets.New(path...), false)
-			return hierarchy, util.NewHierarchyCycleError(minEntityKey(path[slices.Index(path, currentKey):]))
-		}
-		visited.Insert(currentKey)
-		// The key is recorded before the lookup below, so that the observed children of a missing
-		// group are still collected as part of the hierarchy.
-		path = append(path, currentKey)
-
-		gpg, ok := wf.podGroups[currentKey]
-		if !ok {
-			hierarchy, _ := wf.collectSubtrees(sets.New(path...), false)
-			return hierarchy, util.NewHierarchyGroupNotFoundError(currentKey)
-		}
-
-		if !wf.isCompositePodGroupEnabled || !gpg.HasParent() {
-			break
-		}
-		parentKey, _ := gpg.GetParentKey()
-		currentKey = parentKey
-	}
-
-	// currentKey is the root of the hierarchy. The depth of the branches other than the one walked
-	// above is only known when walking back down, so the whole hierarchy is verified there.
-	return wf.collectSubtrees(sets.New(currentKey), true)
-}
-
-// collectSubtrees returns the given groups together with all their descendants, skipping the groups
-// that have not been observed yet. With checkDepth set, it also verifies that no branch of the
-// collected subtrees exceeds WorkloadMaxTreeDepth, counting the given roots as the first level.
-// Cycles are not detected here: a group has a single parent, so the groups forming a cycle are only
-// reachable by walking into it, never downwards from a group outside of it.
-func (wf *workloadForest) collectSubtrees(roots sets.Set[fwk.EntityKey], checkDepth bool) ([]*fwk.GenericPodGroup, error) {
-	type groupAtDepth struct {
-		key   fwk.EntityKey
-		depth int
-	}
-	visited := roots.Clone()
-	queue := make([]groupAtDepth, 0, len(roots))
-	for key := range roots {
-		queue = append(queue, groupAtDepth{key: key, depth: 1})
-	}
-	hierarchy := make([]*fwk.GenericPodGroup, 0, len(queue))
-	var tooDeep *groupAtDepth
-
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
-
-		if gpg, ok := wf.podGroups[current.key]; ok {
-			hierarchy = append(hierarchy, gpg)
-		}
-		// The traversal continues past a too deep group, because the caller reports the problem
-		// on every group of the hierarchy.
-		if checkDepth && current.depth > schedulingv1alpha3.WorkloadMaxTreeDepth &&
-			(tooDeep == nil || current.key.String() < tooDeep.key.String()) {
-			tooDeep = &current
-		}
-		for childKey := range wf.children[current.key] {
-			if !visited.Has(childKey) {
-				visited.Insert(childKey)
-				queue = append(queue, groupAtDepth{key: childKey, depth: current.depth + 1})
-			}
-		}
-	}
-
-	if tooDeep != nil {
-		return hierarchy, util.NewHierarchyDepthExceededError(tooDeep.depth, tooDeep.key)
-	}
-	return hierarchy, nil
-}
-
-// minEntityKey returns the smallest of the given keys, which must not be empty.
-// When several groups break the same rule, the error names only one of them, and picking it
-// deterministically keeps the reported message - and the conditions patched from it - stable.
-func minEntityKey(keys []fwk.EntityKey) fwk.EntityKey {
-	res := keys[0]
-	for _, key := range keys[1:] {
-		if key.String() < res.String() {
-			res = key
-		}
-	}
-	return res
 }
